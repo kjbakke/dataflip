@@ -4,6 +4,7 @@ A VS Code extension modelled on the JetBrains Rider database tool window. Clean-
 
 - **Data Sources** view: data source → databases (PostgreSQL, SQL Server) → schema → tables / views → columns (PK, type, nullability). MySQL lists its databases as schemas, BigQuery its datasets.
 - **Query consoles**: any `.sql` file can be attached to a data source and database (status bar, click to switch)
+- **Autocomplete** in consoles from the attached database: tables and schemas after `FROM` / `JOIN` / `UPDATE` / `INTO`, a schema's tables after `schema.`, columns after `alias.` / `table.` (aliases read from the statement), and elsewhere the columns of the statement's tables first, then tables and keywords. Names are quoted per dialect when needed; metadata is cached until Refresh
 - **Cmd/Ctrl+Enter** runs the selection, or the statement under the caret
 - **Results** grid in the bottom panel; **Open Table Data** shows the first 500 rows
 - **Column filters** like Excel: ▾ on each header lists the column's distinct values with counts, with search, (Select all), `<null>` and sort. In Open Table they run in the database over the whole table (values bound as parameters, each list respecting the other filters); on console results they filter the loaded rows.
@@ -30,4 +31,4 @@ Set `DATAFLIP_PG`, `DATAFLIP_MYSQL`, `DATAFLIP_MSSQL` or `DATAFLIP_BIGQUERY` to 
 
 ## Limits
 
-No autocomplete, one result tab, at most 1000 rows rendered, no column type changes.
+One result tab, at most 1000 rows rendered, no column type changes.

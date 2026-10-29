@@ -2,6 +2,7 @@
 //   run(sql, params?) -> { columns: string[], rows: any[][], affected?: number, total?: number }
 //   schemas(), tables(schema), columns(schema, table), quote(ident), param(n), close()
 //   limit(selectSql, n) -> the dialect's row limit (LIMIT n, or TOP n on SQL Server)
+//   currentSchema() -> where unqualified table names resolve (undefined on BigQuery: names need a dataset)
 //   addColumn / renameColumn / dropColumn -> [sql, params?]
 //   transaction(statements)  (absent = grid editing unsupported)
 //   databases()  (present = the tree lists every database on the server; connect again with cfg.database to open one)
@@ -64,6 +65,7 @@ async function postgres(cfg, password) {
     close: () => client.end(),
     databases: async () => (await run(
       'select datname from pg_database where not datistemplate and datallowconn order by 1')).rows.map((r) => r[0]),
+    currentSchema: async () => (await run('select current_schema()')).rows[0][0],
     schemas: async () => (await run(
       `select schema_name from information_schema.schemata
        where schema_name not in ('information_schema', 'pg_catalog')
@@ -106,6 +108,7 @@ async function mysql(cfg, password) {
     transaction: sqlTransaction(run, 'start transaction'),
     ...alterColumns(bq),
     close: () => conn.end(),
+    currentSchema: async () => (await run('select database()')).rows[0][0],
     schemas: async () => (await run(
       `select schema_name from information_schema.schemata
        where schema_name not in ('information_schema', 'mysql', 'performance_schema', 'sys') order by 1`
@@ -138,6 +141,7 @@ async function sqlite(cfg) {
     transaction: sqlTransaction(run),
     ...alterColumns(dq),
     close: async () => db.close(),
+    currentSchema: async () => 'main',
     schemas: async () => ['main'],
     tables: async () => (await run(
       `select name, type from sqlite_master where type in ('table', 'view') and name not like 'sqlite\\_%' escape '\\' order by 1`
@@ -179,6 +183,7 @@ async function mssql(cfg, password) {
     addColumn: (s, t, name, type) => [`alter table ${sq(s)}.${sq(t)} add ${sq(name)} ${type}`],
     renameColumn: (s, t, from, to) => ['exec sp_rename @p1, @p2, \'COLUMN\'', [`${sq(s)}.${sq(t)}.${sq(from)}`, to]],
     close: () => pool.close(),
+    currentSchema: async () => (await run('select schema_name()')).rows[0][0],
     databases: async () => (await run(
       `select name from sys.databases where state_desc = 'ONLINE' and has_dbaccess(name) = 1 order by 1`)).rows.map((r) => r[0]),
     // schema_id >= 16384 are the fixed db_* role schemas
@@ -230,6 +235,7 @@ async function bigquery(cfg) {
     limit,
     ...alterColumns(bqq),
     close: async () => {},
+    currentSchema: async () => undefined,
     schemas: async () => (await client.getDatasets())[0].map((d) => d.id).sort(),
     tables: async (schema) => (await client.dataset(schema).getTables())[0]
       .map((t) => ({ name: t.id, view: /VIEW/.test(t.metadata?.type || '') }))

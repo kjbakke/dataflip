@@ -66,6 +66,7 @@ for (const c of cases) {
 
       assert.ok((await db.schemas()).includes(schema));
       if (db.databases) assert.ok((await db.databases()).includes(c.cfg.database));
+      assert.strictEqual(await db.currentSchema(), c.emulator ? undefined : schema);
       assert.deepStrictEqual((await db.tables(schema)).find((x) => x.name === c.table), { name: c.table, view: false });
       const cols = await db.columns(schema, c.table);
       if (c.emulator) assert.deepStrictEqual(cols.map((col) => col.name), ['id', 'name', 'note', 'placed']);
