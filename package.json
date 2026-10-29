@@ -264,6 +264,26 @@
           "command": "dataflip.history.copy",
           "when": "view == dataflip.history && viewItem == history",
           "group": "1_main@3"
+        },
+        {
+          "command": "dataflip.newConsole",
+          "when": "view == dataflip.sources && viewItem == database",
+          "group": "inline@1"
+        },
+        {
+          "command": "dataflip.newConsole",
+          "when": "view == dataflip.sources && viewItem == database",
+          "group": "1_main@1"
+        },
+        {
+          "command": "dataflip.refresh",
+          "when": "view == dataflip.sources && viewItem =~ /^(database|schema|table)$/",
+          "group": "1_main@9"
+        },
+        {
+          "command": "dataflip.copyName",
+          "when": "view == dataflip.sources && viewItem == database",
+          "group": "1_main@2"
         }
       ],
       "editor/title": [
