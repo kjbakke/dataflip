@@ -5,6 +5,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { DRIVERS } = require('../src/drivers');
+const { buildChanges } = require('../src/dml');
 
 const env = (name) => process.env[name] && JSON.parse(process.env[name]);
 const sqlDdl = (t) => `create table ${t} (id int not null primary key, name varchar(20) not null, note varchar(20))`;
@@ -40,6 +41,8 @@ for (const c of cases) {
       const flat = (v) => (v === null ? null : typeof v === 'object' && 'value' in v ? String(v.value) : String(v));
       assert.deepStrictEqual(res.rows.map((r) => r.map(flat)), [['1', 'a', null], ['2', 'b', 'x']]);
       assert.strictEqual((await db.run(db.preview(schema, c.table))).rows.length, 2);
+      const filtered = await db.run(db.preview(schema, c.table, { where: `${db.quote('name')} <> 'a'`, orderBy: `${db.quote('id')} desc` }));
+      assert.deepStrictEqual(filtered.rows.map((r) => flat(r[0])), ['2']);
 
       assert.ok((await db.schemas()).includes(schema));
       assert.deepStrictEqual((await db.tables(schema)).find((x) => x.name === c.table), { name: c.table, view: false });
@@ -50,6 +53,33 @@ for (const c of cases) {
         ['name', false, false],
         ['note', true, false],
       ]);
+
+      // grid edits: one transaction, keyed by primary key
+      if (db.transaction) {
+        await db.transaction(buildChanges(db, schema, c.table, {
+          deletes: [{ key: { id: 2 } }],
+          updates: [{ key: { id: 1 }, values: { name: 'A', note: null } }],
+          inserts: [{ values: { id: 3, name: 'c' } }],
+        }));
+        const after = await db.run(`select id, name, note from ${t} order by id`);
+        assert.deepStrictEqual(after.rows.map((r) => r.map(flat)), [['1', 'A', null], ['3', 'c', null]]);
+
+        // a key that matches nothing rolls back the whole batch
+        await assert.rejects(db.transaction(buildChanges(db, schema, c.table, {
+          updates: [{ key: { id: 1 }, values: { name: 'Z' } }, { key: { id: 99 }, values: { name: 'Z' } }],
+        })), /Expected 1 row but 0 matched/);
+        assert.strictEqual(flat((await db.run(`select name from ${t} where id = 1`)).rows[0][0]), 'A');
+      }
+
+      // column DDL (the emulator lacks RENAME COLUMN and does not update metadata after ALTER)
+      if (!c.emulator) {
+        const ddlRun = ([sql, params]) => db.run(sql, params);
+        await ddlRun(db.addColumn(schema, c.table, 'extra col', 'varchar(10)'));
+        await ddlRun(db.renameColumn(schema, c.table, 'extra col', 'renamed'));
+        assert.deepStrictEqual((await db.columns(schema, c.table)).map((col) => col.name), ['id', 'name', 'note', 'renamed']);
+        await ddlRun(db.dropColumn(schema, c.table, 'renamed'));
+        assert.deepStrictEqual((await db.columns(schema, c.table)).map((col) => col.name), ['id', 'name', 'note']);
+      }
     } finally {
       await db.run(`drop table if exists ${t}`);
       await db.close();

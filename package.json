@@ -41,6 +41,11 @@
           "id": "dataflip.sources",
           "name": "Data Sources",
           "icon": "$(database)"
+        },
+        {
+          "id": "dataflip.history",
+          "name": "Query History",
+          "icon": "$(history)"
         }
       ],
       "dataflipPanel": [
@@ -109,6 +114,51 @@
         "title": "Execute Statement",
         "category": "Database",
         "icon": "$(play)"
+      },
+      {
+        "command": "dataflip.addColumn",
+        "title": "Add Column…",
+        "category": "Database",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dataflip.renameColumn",
+        "title": "Rename Column…",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.dropColumn",
+        "title": "Drop Column…",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.deleteConsole",
+        "title": "Delete Console",
+        "category": "Database",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dataflip.history.open",
+        "title": "Open in Console",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.history.rerun",
+        "title": "Run Again",
+        "category": "Database",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dataflip.history.copy",
+        "title": "Copy SQL",
+        "category": "Database",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "dataflip.history.clear",
+        "title": "Clear Query History",
+        "category": "Database",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -122,6 +172,11 @@
           "command": "dataflip.refresh",
           "when": "view == dataflip.sources",
           "group": "navigation@2"
+        },
+        {
+          "command": "dataflip.history.clear",
+          "when": "view == dataflip.history",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -164,6 +219,51 @@
           "command": "dataflip.copyName",
           "when": "view == dataflip.sources && viewItem =~ /^(table|column|schema)$/",
           "group": "1_main@2"
+        },
+        {
+          "command": "dataflip.addColumn",
+          "when": "view == dataflip.sources && viewItem == table",
+          "group": "2_columns@1"
+        },
+        {
+          "command": "dataflip.renameColumn",
+          "when": "view == dataflip.sources && viewItem == column",
+          "group": "2_columns@1"
+        },
+        {
+          "command": "dataflip.dropColumn",
+          "when": "view == dataflip.sources && viewItem == column",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "dataflip.deleteConsole",
+          "when": "view == dataflip.sources && viewItem == console",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "dataflip.history.rerun",
+          "when": "view == dataflip.history && viewItem == history",
+          "group": "inline@1"
+        },
+        {
+          "command": "dataflip.history.copy",
+          "when": "view == dataflip.history && viewItem == history",
+          "group": "inline@2"
+        },
+        {
+          "command": "dataflip.history.open",
+          "when": "view == dataflip.history && viewItem == history",
+          "group": "1_main@1"
+        },
+        {
+          "command": "dataflip.history.rerun",
+          "when": "view == dataflip.history && viewItem == history",
+          "group": "1_main@2"
+        },
+        {
+          "command": "dataflip.history.copy",
+          "when": "view == dataflip.history && viewItem == history",
+          "group": "1_main@3"
         }
       ],
       "editor/title": [
@@ -188,6 +288,34 @@
         },
         {
           "command": "dataflip.disconnect",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.addColumn",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.renameColumn",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.dropColumn",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.deleteConsole",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.history.open",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.history.rerun",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.history.copy",
           "when": "false"
         }
       ]

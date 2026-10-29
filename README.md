@@ -6,6 +6,9 @@ A VS Code extension modelled on the JetBrains Rider database tool window. Clean-
 - **Query consoles**: any `.sql` file can be attached to a data source (status bar)
 - **Cmd/Ctrl+Enter** runs the selection, or the statement under the caret
 - **Results** grid in the bottom panel; **Open Table Data** shows the first 500 rows
+- **Table editor** (Open Table): `WHERE` / `ORDER BY` boxes and click-to-sort headers, run on the server. Double-click a cell to edit, add / delete rows, set NULL; changes stay pending until **Submit** (Cmd/Ctrl+Enter), which runs them in one transaction keyed by primary key. Any update or delete that does not hit exactly one row rolls the whole batch back. Tables without a primary key, views and BigQuery are read-only.
+- **Columns**: add, rename and drop from the tree's context menu
+- **Consoles** are saved files listed under each data source; **Query History** lists every statement run from a console (open in a console, run again, copy)
 - PostgreSQL (`pg`), MySQL / MariaDB (`mysql2`), SQL Server (`mssql`), SQLite (built-in `node:sqlite`), BigQuery (`@google-cloud/bigquery`)
 - Passwords live in VS Code secret storage
 
@@ -25,4 +28,4 @@ Set `DATAFLIP_PG`, `DATAFLIP_MYSQL`, `DATAFLIP_MSSQL` or `DATAFLIP_BIGQUERY` to 
 
 ## Limits
 
-Read-only grid (no cell editing), no autocomplete, one result tab, one Postgres database per data source, at most 1000 rows rendered.
+No autocomplete, one result tab, one database per Postgres / SQL Server data source, at most 1000 rows rendered, no column type changes.

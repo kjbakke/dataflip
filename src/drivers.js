@@ -1,11 +1,41 @@
 // Each driver exposes the same shape:
 //   run(sql, params?) -> { columns: string[], rows: any[][], affected?: number, total?: number }
-//   schemas(), tables(schema), columns(schema, table), quote(ident), preview(schema, table), close()
+//   schemas(), tables(schema), columns(schema, table), quote(ident), param(n), close()
+//   preview(schema, table, { where?, orderBy? }) -> first 500 rows; where / orderBy are raw SQL typed by the user
+//   addColumn / renameColumn / dropColumn -> [sql, params?]
+//   transaction(statements)  (absent = grid editing unsupported)
 
 const dq = (s) => `"${String(s).replace(/"/g, '""')}"`;
 const bq = (s) => '`' + String(s).replace(/`/g, '``') + '`';
 const sq = (s) => `[${String(s).replace(/]/g, ']]')}]`;
-const limit500 = (quote) => (schema, table) => `select * from ${quote(schema)}.${quote(table)} limit 500`;
+const clauses = ({ where, orderBy } = {}) => (where ? ` where ${where}` : '') + (orderBy ? ` order by ${orderBy}` : '');
+const limit500 = (quote) => (schema, table, filter) =>
+  `select * from ${quote(schema)}.${quote(table)}${clauses(filter)} limit 500`;
+const qmark = () => '?';
+
+const alterColumns = (quote) => ({
+  addColumn: (s, t, name, type) => [`alter table ${quote(s)}.${quote(t)} add column ${quote(name)} ${type}`],
+  renameColumn: (s, t, from, to) => [`alter table ${quote(s)}.${quote(t)} rename column ${quote(from)} to ${quote(to)}`],
+  dropColumn: (s, t, name) => [`alter table ${quote(s)}.${quote(t)} drop column ${quote(name)}`],
+});
+
+// Runs { sql, params, expectOne } statements atomically. An update/delete that does not hit
+// exactly one row aborts the whole batch, so a stale or non-unique key never changes extra rows.
+const inTransaction = (begin, commit, rollback, run) => async (stmts) => {
+  await begin();
+  try {
+    for (const s of stmts) {
+      const { affected } = await run(s.sql, s.params);
+      if (s.expectOne && affected !== 1) throw new Error(`Expected 1 row but ${affected} matched: ${s.sql}`);
+    }
+    await commit();
+  } catch (err) {
+    await rollback().catch(() => {});
+    throw err;
+  }
+};
+const sqlTransaction = (run, begin = 'begin') =>
+  inTransaction(() => run(begin), () => run('commit'), () => run('rollback'), run);
 
 async function postgres(cfg, password) {
   const { Client } = require('pg');
@@ -24,7 +54,10 @@ async function postgres(cfg, password) {
   return {
     run,
     quote: dq,
+    param: (n) => `$${n}`,
     preview: limit500(dq),
+    transaction: sqlTransaction(run),
+    ...alterColumns(dq),
     close: () => client.end(),
     schemas: async () => (await run(
       `select schema_name from information_schema.schemata
@@ -62,7 +95,10 @@ async function mysql(cfg, password) {
   return {
     run,
     quote: bq,
+    param: qmark,
     preview: limit500(bq),
+    transaction: sqlTransaction(run, 'start transaction'),
+    ...alterColumns(bq),
     close: () => conn.end(),
     schemas: async () => (await run(
       `select schema_name from information_schema.schemata
@@ -91,7 +127,10 @@ async function sqlite(cfg) {
   return {
     run,
     quote: dq,
+    param: qmark,
     preview: limit500(dq),
+    transaction: sqlTransaction(run),
+    ...alterColumns(dq),
     close: async () => db.close(),
     schemas: async () => ['main'],
     tables: async () => (await run(
@@ -109,9 +148,9 @@ async function mssql(cfg, password) {
     server: cfg.host, port: cfg.port, database: cfg.database || undefined, user: cfg.user, password,
     options: { encrypt: !!cfg.ssl, trustServerCertificate: true },
   }).connect();
-  // params bind as @p1, @p2, ...
-  const run = async (text, params = []) => {
-    const req = pool.request();
+  // params bind as @p1, @p2, ...; target is the pool or an open transaction
+  const runOn = (target) => async (text, params = []) => {
+    const req = target.request();
     req.arrayRowMode = true;
     params.forEach((v, i) => req.input(`p${i + 1}`, v));
     const res = await req.query(text);
@@ -120,10 +159,19 @@ async function mssql(cfg, password) {
       ? { columns: cols.map((c) => c.name), rows: res.recordsets[res.recordsets.length - 1] }
       : { columns: [], rows: [], affected: res.rowsAffected.reduce((a, b) => a + b, 0) };
   };
+  const run = runOn(pool);
   return {
     run,
     quote: sq,
-    preview: (schema, table) => `select top 500 * from ${sq(schema)}.${sq(table)}`,
+    param: (n) => `@p${n}`,
+    preview: (schema, table, filter) => `select top 500 * from ${sq(schema)}.${sq(table)}${clauses(filter)}`,
+    transaction: (stmts) => {
+      const tx = new sql.Transaction(pool);
+      return inTransaction(() => tx.begin(), () => tx.commit(), () => tx.rollback(), runOn(tx))(stmts);
+    },
+    ...alterColumns(sq),
+    addColumn: (s, t, name, type) => [`alter table ${sq(s)}.${sq(t)} add ${sq(name)} ${type}`],
+    renameColumn: (s, t, from, to) => ['exec sp_rename @p1, @p2, \'COLUMN\'', [`${sq(s)}.${sq(t)}.${sq(from)}`, to]],
     close: () => pool.close(),
     // schema_id >= 16384 are the fixed db_* role schemas
     schemas: async () => (await run(
@@ -170,7 +218,9 @@ async function bigquery(cfg) {
   return {
     run,
     quote: bqq,
-    preview: (schema, table) => `select * from ${bqq(schema)}.${bqq(table)} limit 500`,
+    param: qmark,
+    preview: limit500(bqq),
+    ...alterColumns(bqq),
     close: async () => {},
     schemas: async () => (await client.getDatasets())[0].map((d) => d.id).sort(),
     tables: async (schema) => (await client.dataset(schema).getTables())[0]
