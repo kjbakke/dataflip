@@ -3,7 +3,7 @@ const crypto = require('node:crypto');
 const { DRIVERS } = require('./drivers');
 const { statementAt } = require('./splitter');
 const { KEYWORDS, tableRefs, caretContext, ident, same } = require('./completion');
-const { ResultsView } = require('./results');
+const { GridTabs } = require('./results');
 const { cell } = require('./cell');
 const { tableQuery, DISTINCT_MAX } = require('./query');
 const { buildChanges } = require('./dml');
@@ -24,7 +24,7 @@ function activate(context) {
   // only an explicit action does (expanding it, running a query, opening a table).
   const disconnected = new Set();
   const collapseGen = new Map(); // source id -> bumped on Disconnect; a new tree id makes VS Code show it collapsed
-  const results = new ResultsView();
+  const tabs = new GridTabs(vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png'));
 
   const sources = () => globalState.get(SOURCES, []);
   const source = (id) => sources().find((s) => s.id === id);
@@ -380,13 +380,15 @@ function activate(context) {
       editor.setDecorations(flash, [range]);
       setTimeout(() => editor.setDecorations(flash, []), 400);
     }
-    await runAndShow(b.ds, b.database, sql);
+    await runAndShow(b.ds, b.database, sql, `console:${doc.uri}`);
   }
 
-  async function runAndShow(ds, database, sql) {
+  // Runs SQL into the results tab `key` (one per console), shown beside the console.
+  async function runAndShow(ds, database, sql, key) {
     const title = targetName(ds, database);
-    opened = undefined;
-    results.running(title);
+    const grid = tabs.open(key, sql.replace(/\s+/g, ' ').slice(0, 40), { beside: true });
+    grid.state = grid.onAction = undefined;
+    grid.running(title);
     const entry = { sql, source: ds.id, database: ownDb(ds, database), at: Date.now() };
     try {
       const db = await connect(ds, database);
@@ -395,24 +397,27 @@ function activate(context) {
       entry.ms = Date.now() - t0;
       entry.rows = res.columns.length ? res.total ?? res.rows.length : undefined;
       entry.affected = res.affected;
-      results.result(title, res, entry.ms);
+      grid.result(title, res, entry.ms);
     } catch (err) {
       entry.error = err.message || String(err);
-      results.error(title, err);
+      grid.error(title, err);
     }
     await globalState.update(HISTORY, [entry, ...history()].slice(0, HISTORY_MAX));
     historyChanged.fire();
   }
 
-  // ---- Open Table: filterable; editable when the driver has transactions and the table a primary key
+  // ---- Open Table: a tab per table, filterable; editable when the driver has transactions and the table a primary key
 
-  // opened = what is behind the grid, cleared by any other result:
+  const tableKey = (ds, database, schema, table) => `table:${ds.id}/${ownDb(ds, database) ?? ''}/${schema}/${table}`;
+
+  // grid.state = the table behind the tab:
   // { ds, database, schema, table, view, columns, rows, pk, filter: { where, orderBy }, filters, distinct }
-  let opened;
   async function openTable(ds, database, schema, table, view, filter = {}, filters = {}) {
     const title = (ownDb(ds, database) ? `${database}.` : '') + `${schema}.${table}`;
-    opened = undefined;
-    results.running(title);
+    const grid = tabs.open(tableKey(ds, database, schema, table), title);
+    grid.onAction = (msg) => tableAction(grid, msg);
+    grid.state = undefined;
+    grid.running(title);
     try {
       const db = await connect(ds, database);
       const t0 = Date.now();
@@ -423,17 +428,17 @@ function activate(context) {
         : view ? 'Read-only: view'
         : !pk.length ? 'Read-only: table has no primary key'
         : undefined;
-      opened = { ds, database, schema, table, view, columns: res.columns, rows: res.rows, pk, filter, filters };
-      results.result(title, res, Date.now() - t0, {
+      grid.state = { ds, database, schema, table, view, columns: res.columns, rows: res.rows, pk, filter, filters };
+      grid.result(title, res, Date.now() - t0, {
         pk, quoted: res.columns.map(db.quote), ...filter, filtered: Object.keys(filters), readOnly,
       });
     } catch (err) {
-      results.error(title, err);
+      grid.error(title, err);
     }
   }
 
-  results.onAction = async (msg) => {
-    const o = opened;
+  async function tableAction(grid, msg) {
+    const o = grid.state;
     if (!o) return;
     const { ds, database, schema, table, view } = o;
 
@@ -446,13 +451,13 @@ function activate(context) {
         const chosen = o.filters[msg.col];
         const keys = chosen && new Set([...chosen.values.map(cell), ...(chosen.nulls ? [null] : [])]);
         o.distinct = { col: msg.col, raws: res.rows.map((r) => r[0]) };
-        results.notify({ distinct: {
+        grid.notify({ distinct: {
           col: msg.col,
           truncated: res.rows.length >= DISTINCT_MAX,
           items: res.rows.map(([v, n]) => ({ label: cell(v), count: Number(cell(n)), checked: !keys || keys.has(cell(v)) })),
         } });
       } catch (err) {
-        results.notify({ distinct: { col: msg.col, error: err.message || String(err) } });
+        grid.notify({ distinct: { col: msg.col, error: err.message || String(err) } });
       }
       return;
     }
@@ -472,7 +477,7 @@ function activate(context) {
     if (msg.type === 'submit') {
       try {
         const db = await connect(ds, database);
-        const keyOf = (row) => Object.fromEntries(opened.pk.map((c) => [c, opened.rows[row][opened.columns.indexOf(c)]]));
+        const keyOf = (row) => Object.fromEntries(o.pk.map((c) => [c, o.rows[row][o.columns.indexOf(c)]]));
         const { deletes, updates, inserts } = msg.changes;
         await db.transaction(buildChanges(db, schema, table, {
           deletes: deletes.map((row) => ({ key: keyOf(row) })),
@@ -480,11 +485,11 @@ function activate(context) {
           inserts,
         }));
       } catch (err) {
-        return results.submitError(err);
+        return grid.submitError(err);
       }
     }
     await openTable(ds, database, schema, table, view, filter, filters);
-  };
+  }
 
   // ---- column DDL from the tree
 
@@ -497,11 +502,10 @@ function activate(context) {
     }
     forget(tableNode.ds);
     tree.fire(tableNode);
-    const same = (a, b) => ownDb(a.ds, a.database) === ownDb(b.ds, b.database);
-    if (opened?.ds.id === tableNode.ds.id && same(opened, tableNode) && opened.schema === tableNode.schema && opened.table === tableNode.name) {
-      openTable(opened.ds, opened.database, opened.schema, opened.table, opened.view, opened.filter, opened.filters);
-    }
+    const o = tabs.tabs.get(tableKey(tableNode.ds, tableNode.database, tableNode.schema, tableNode.name))?.state;
+    if (o) openTable(o.ds, o.database, o.schema, o.table, o.view, o.filter, o.filters);
   }
+
   const askName = (prompt, value) => vscode.window.showInputBox({
     prompt, value, ignoreFocusOut: true, validateInput: (v) => (v.trim() ? null : 'Name is required'),
   });
@@ -626,7 +630,7 @@ function activate(context) {
     vscode.languages.registerCompletionItemProvider('sql', {
       provideCompletionItems: (doc, pos) => completions(doc, pos).catch(() => keywordItems()),
     }, '.'),
-    vscode.window.registerWebviewViewProvider('dataflip.results', results, { webviewOptions: { retainContextWhenHidden: true } }),
+    tabs,
     vscode.window.onDidChangeActiveTextEditor(updateStatus),
     vscode.workspace.onDidOpenTextDocument(updateStatus),
 
@@ -699,7 +703,7 @@ function activate(context) {
     }),
     cmd('dataflip.history.rerun', (h) => {
       const ds = historySource(h);
-      if (ds) return runAndShow(ds, h.database, h.sql);
+      if (ds) return runAndShow(ds, h.database, h.sql, `history:${h.source}/${h.database ?? ''}`);
     }),
     cmd('dataflip.history.copy', (h) => vscode.env.clipboard.writeText(h.sql)),
     cmd('dataflip.history.clear', async () => {
@@ -715,7 +719,7 @@ function activate(context) {
     { dispose: () => connections.forEach((p) => p.then((c) => c.close()).catch(() => {})) },
   );
   updateStatus();
-  if (context.extensionMode === vscode.ExtensionMode.Test) return { context, provider, results };
+  if (context.extensionMode === vscode.ExtensionMode.Test) return { context, provider, tabs };
 }
 
 module.exports = { activate, deactivate() {} };
