@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Export and import data sources, with their consoles and query history, optionally including passwords: for backups, a new machine, or moving between installs
+
 ## 0.1.0
 
 First release.
