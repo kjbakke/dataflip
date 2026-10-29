@@ -163,6 +163,18 @@
         "title": "Clear Query History",
         "category": "Database",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "dataflip.editSource",
+        "title": "Edit Data Source…",
+        "category": "Database",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dataflip.duplicateSource",
+        "title": "Duplicate Data Source",
+        "category": "Database",
+        "icon": "$(copy)"
       }
     ],
     "menus": {
@@ -288,6 +300,21 @@
           "command": "dataflip.copyName",
           "when": "view == dataflip.sources && viewItem == database",
           "group": "1_main@2"
+        },
+        {
+          "command": "dataflip.editSource",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "inline@2"
+        },
+        {
+          "command": "dataflip.editSource",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "3_source@1"
+        },
+        {
+          "command": "dataflip.duplicateSource",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "3_source@2"
         }
       ],
       "editor/title": [
@@ -340,6 +367,14 @@
         },
         {
           "command": "dataflip.history.copy",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.editSource",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.duplicateSource",
           "when": "false"
         }
       ]
