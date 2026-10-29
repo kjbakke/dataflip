@@ -22,27 +22,36 @@ function activate(context) {
   const sources = () => globalState.get(SOURCES, []);
   const source = (id) => sources().find((s) => s.id === id);
 
-  function connect(ds) {
-    if (!connections.has(ds.id)) {
-      const p = secrets.get(secretKey(ds.id)).then((pw) => DRIVERS[ds.driver].connect(ds, pw));
-      connections.set(ds.id, p);
-      p.then(() => tree.fire(sourceNodes.get(ds.id)), () => connections.delete(ds.id));
+  // One connection per data source and database; database undefined = the one configured on the source.
+  const ownDb = (ds, database) => (database && database !== ds.database ? database : undefined);
+  const connKeys = (ds) => [...connections.keys()].filter((k) => k.startsWith(ds.id + '/'));
+  function connect(ds, database) {
+    database = ownDb(ds, database);
+    const key = `${ds.id}/${database ?? ''}`;
+    if (!connections.has(key)) {
+      const first = !connKeys(ds).length;
+      const p = secrets.get(secretKey(ds.id)).then((pw) => DRIVERS[ds.driver].connect(database ? { ...ds, database } : ds, pw));
+      connections.set(key, p);
+      p.then(() => first && tree.fire(sourceNodes.get(ds.id)), () => connections.delete(key)); // first connection turns the icon green
     }
-    return connections.get(ds.id);
+    return connections.get(key);
   }
 
   async function disconnect(ds) {
-    const p = connections.get(ds.id);
-    connections.delete(ds.id);
-    if (p) await p.then((c) => c.close()).catch(() => {});
+    await Promise.all(connKeys(ds).map((k) => {
+      const p = connections.get(k);
+      connections.delete(k);
+      return p.then((c) => c.close()).catch(() => {});
+    }));
   }
 
-  // ---- Data Sources tree: source > schema > tables/views > table > column
+  // ---- Data Sources tree: source > [databases >] schema > tables/views > table > column
 
   const changed = new vscode.EventEmitter();
   const tree = { fire: (node) => changed.fire(node) };
   const icon = (id, color) => new vscode.ThemeIcon(id, color && new vscode.ThemeColor(color));
   const Collapsed = vscode.TreeItemCollapsibleState.Collapsed;
+  const base = (n) => `${n.ds.id}/${n.database ?? ''}`;
 
   const provider = {
     onDidChangeTreeData: changed.event,
@@ -55,26 +64,34 @@ function activate(context) {
           item.id = n.ds.id;
           item.contextValue = 'source';
           item.description = d.file ? n.ds.file : d.cloud ? `${d.label} · ${n.ds.project}` : `${d.label} · ${n.ds.host}:${n.ds.port}`;
-          item.iconPath = icon('database', connections.has(n.ds.id) ? 'charts.green' : undefined);
+          item.iconPath = icon('database', connKeys(n.ds).length ? 'charts.green' : undefined);
+          return item;
+        }
+        case 'database': {
+          const item = new vscode.TreeItem(n.database, Collapsed);
+          item.id = `${base(n)}/database`;
+          item.contextValue = 'database';
+          item.description = n.database === n.ds.database ? 'default' : undefined;
+          item.iconPath = icon('database');
           return item;
         }
         case 'schema': {
           const item = new vscode.TreeItem(n.schema, Collapsed);
-          item.id = `${n.ds.id}/${n.schema}`;
+          item.id = `${base(n)}/${n.schema}`;
           item.contextValue = 'schema';
           item.iconPath = icon('symbol-namespace');
           return item;
         }
         case 'folder': {
           const item = new vscode.TreeItem(n.view ? 'views' : 'tables', Collapsed);
-          item.id = `${n.ds.id}/${n.schema}/${n.view ? 'views' : 'tables'}`;
+          item.id = `${base(n)}/${n.schema}/${n.view ? 'views' : 'tables'}`;
           item.iconPath = icon('folder');
           item.description = String(n.items.length);
           return item;
         }
         case 'table': {
           const item = new vscode.TreeItem(n.name, Collapsed);
-          item.id = `${n.ds.id}/${n.schema}/${n.view ? 'views' : 'tables'}/${n.name}`;
+          item.id = `${base(n)}/${n.schema}/${n.view ? 'views' : 'tables'}/${n.name}`;
           item.contextValue = 'table';
           item.iconPath = icon(n.view ? 'eye' : 'table');
           return item;
@@ -97,7 +114,7 @@ function activate(context) {
         }
         case 'column': {
           const item = new vscode.TreeItem(n.col.name);
-          item.id = `${n.ds.id}/${n.schema}/${n.table}/${n.col.name}`;
+          item.id = `${base(n)}/${n.schema}/${n.table}/${n.col.name}`;
           item.contextValue = 'column';
           item.description = n.col.type + (n.col.nullable ? '' : ' not null');
           item.iconPath = n.col.pk ? icon('key', 'charts.yellow') : icon('symbol-field');
@@ -122,25 +139,31 @@ function activate(context) {
         });
       }
       try {
-        const db = await connect(n.ds);
+        const db = await connect(n.ds, n.database);
+        const { ds, database } = n;
+        const schemas = async () => (await db.schemas()).map((schema) => ({ kind: 'schema', ds, database, schema }));
         switch (n.kind) {
           case 'source': {
-            const schemas = (await db.schemas()).map((schema) => ({ kind: 'schema', ds: n.ds, schema }));
-            const files = await consoleFiles(n.ds);
-            return files.length ? [{ kind: 'consoles', ds: n.ds, files }, ...schemas] : schemas;
+            const below = db.databases
+              ? (await db.databases()).map((name) => ({ kind: 'database', ds, database: name }))
+              : await schemas();
+            const files = await consoleFiles(ds);
+            return files.length ? [{ kind: 'consoles', ds, files }, ...below] : below;
           }
+          case 'database':
+            return schemas();
           case 'consoles':
-            return n.files.map((uri) => ({ kind: 'console', ds: n.ds, uri }));
+            return n.files.map((uri) => ({ kind: 'console', ds, uri }));
           case 'schema': {
             const all = await db.tables(n.schema);
             return [false, true]
-              .map((view) => ({ kind: 'folder', ds: n.ds, schema: n.schema, view, items: all.filter((t) => t.view === view) }))
+              .map((view) => ({ kind: 'folder', ds, database, schema: n.schema, view, items: all.filter((t) => t.view === view) }))
               .filter((f) => f.items.length);
           }
           case 'folder':
-            return n.items.map((t) => ({ kind: 'table', ds: n.ds, schema: n.schema, ...t }));
+            return n.items.map((t) => ({ kind: 'table', ds, database, schema: n.schema, ...t }));
           case 'table':
-            return (await db.columns(n.schema, n.name)).map((col) => ({ kind: 'column', ds: n.ds, schema: n.schema, table: n.name, col, parent: n }));
+            return (await db.columns(n.schema, n.name)).map((col) => ({ kind: 'column', ds, database, schema: n.schema, table: n.name, col, parent: n }));
         }
       } catch (err) {
         return [{ kind: 'error', message: err.message || String(err) }];
@@ -151,10 +174,17 @@ function activate(context) {
 
   // ---- console <-> data source binding, shown in the status bar
 
+  // file uri -> { source, database? }; console files also belong to the source whose folder they are in
   const bindings = () => globalState.get(BINDINGS, {});
   const consoleOwner = (uri) => uri.toString().startsWith(consolesDir.toString() + '/') && uri.path.split('/').slice(-2)[0];
-  const boundSource = (doc) => source(bindings()[doc.uri.toString()] || consoleOwner(doc.uri));
-  const bind = (doc, ds) => globalState.update(BINDINGS, { ...bindings(), [doc.uri.toString()]: ds.id });
+  const binding = (doc) => {
+    const b = bindings()[doc.uri.toString()];
+    const ds = source(b?.source || consoleOwner(doc.uri));
+    return ds && { ds, database: b?.source === ds.id ? b.database : undefined };
+  };
+  const bind = (uri, ds, database) =>
+    globalState.update(BINDINGS, { ...bindings(), [uri.toString()]: { source: ds.id, database: ownDb(ds, database) } });
+  const targetName = (ds, database) => ds.name + (ownDb(ds, database) ? ` / ${database}` : '');
 
   async function consoleFiles(ds) {
     const dir = vscode.Uri.joinPath(consolesDir, ds.id);
@@ -165,10 +195,11 @@ function activate(context) {
       .sort((a, b) => b.path.localeCompare(a.path)); // timestamp names: newest first
   }
 
-  async function newConsole(ds, content = '') {
+  async function newConsole(ds, database, content = '') {
     const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '.');
     const uri = vscode.Uri.joinPath(consolesDir, ds.id, `${stamp}.sql`);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    await bind(uri, ds, database);
     await vscode.window.showTextDocument(uri);
     tree.fire(sourceNodes.get(ds.id));
     updateStatus();
@@ -179,8 +210,8 @@ function activate(context) {
   const updateStatus = () => {
     const doc = vscode.window.activeTextEditor?.document;
     if (doc?.languageId !== 'sql') return status.hide();
-    const ds = boundSource(doc);
-    status.text = `$(database) ${ds ? ds.name : 'No data source'}`;
+    const b = binding(doc);
+    status.text = `$(database) ${b ? targetName(b.ds, b.database) : 'No data source'}`;
     status.tooltip = 'Data source for this console (click to change)';
     status.show();
   };
@@ -195,6 +226,17 @@ function activate(context) {
       all.map((ds) => ({ label: ds.name, description: DRIVERS[ds.driver].label, ds })),
       { placeHolder });
     return pick?.ds;
+  }
+
+  // undefined = keep the source's configured database (also when the source has no database list)
+  async function pickDatabase(ds) {
+    const db = await connect(ds).catch(() => undefined);
+    if (!db?.databases) return undefined;
+    const names = await db.databases().catch(() => []);
+    const pick = await vscode.window.showQuickPick(
+      names.map((name) => ({ label: name, description: name === ds.database ? 'default' : undefined })),
+      { placeHolder: `Database on ${ds.name}` });
+    return pick?.label;
   }
 
   async function addSource() {
@@ -267,11 +309,12 @@ function activate(context) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) return;
     const doc = editor.document;
-    let ds = boundSource(doc);
-    if (!ds) {
-      ds = await pickSource('Choose a data source for this console');
+    let b = binding(doc);
+    if (!b) {
+      const ds = await pickSource('Choose a data source for this console');
       if (!ds) return;
-      await bind(doc, ds);
+      b = { ds, database: await pickDatabase(ds) };
+      await bind(doc.uri, b.ds, b.database);
       updateStatus();
     }
     const sel = editor.selection;
@@ -285,15 +328,16 @@ function activate(context) {
       editor.setDecorations(flash, [range]);
       setTimeout(() => editor.setDecorations(flash, []), 400);
     }
-    await runAndShow(ds, sql, ds.name);
+    await runAndShow(b.ds, b.database, sql);
   }
 
-  async function runAndShow(ds, sql, title) {
+  async function runAndShow(ds, database, sql) {
+    const title = targetName(ds, database);
     opened = undefined;
     results.running(title);
-    const entry = { sql, source: ds.id, at: Date.now() };
+    const entry = { sql, source: ds.id, database: ownDb(ds, database), at: Date.now() };
     try {
-      const db = await connect(ds);
+      const db = await connect(ds, database);
       const t0 = Date.now();
       const res = await db.run(sql);
       entry.ms = Date.now() - t0;
@@ -310,13 +354,13 @@ function activate(context) {
 
   // ---- Open Table: filterable; editable when the driver has transactions and the table a primary key
 
-  let opened; // { ds, schema, table, view, columns, rows, pk } behind the grid, cleared by any other result
-  async function openTable(ds, schema, table, view, filter = {}) {
-    const title = `${schema}.${table}`;
+  let opened; // { ds, database, schema, table, view, columns, rows, pk } behind the grid, cleared by any other result
+  async function openTable(ds, database, schema, table, view, filter = {}) {
+    const title = (ownDb(ds, database) ? `${database}.` : '') + `${schema}.${table}`;
     opened = undefined;
     results.running(title);
     try {
-      const db = await connect(ds);
+      const db = await connect(ds, database);
       const t0 = Date.now();
       const [res, cols] = await Promise.all([db.run(db.preview(schema, table, filter)), db.columns(schema, table)]);
       const pk = cols.filter((c) => c.pk).map((c) => c.name);
@@ -324,7 +368,7 @@ function activate(context) {
         : view ? 'Read-only: view'
         : !pk.length ? 'Read-only: table has no primary key'
         : undefined;
-      opened = { ds, schema, table, view, columns: res.columns, rows: res.rows, pk };
+      opened = { ds, database, schema, table, view, columns: res.columns, rows: res.rows, pk };
       results.result(title, res, Date.now() - t0, { pk, quoted: res.columns.map(db.quote), ...filter, readOnly });
     } catch (err) {
       results.error(title, err);
@@ -333,11 +377,11 @@ function activate(context) {
 
   results.onAction = async (msg) => {
     if (!opened) return;
-    const { ds, schema, table, view } = opened;
+    const { ds, database, schema, table, view } = opened;
     const filter = { where: msg.where || undefined, orderBy: msg.orderBy || undefined };
     if (msg.type === 'submit') {
       try {
-        const db = await connect(ds);
+        const db = await connect(ds, database);
         const keyOf = (row) => Object.fromEntries(opened.pk.map((c) => [c, opened.rows[row][opened.columns.indexOf(c)]]));
         const { deletes, updates, inserts } = msg.changes;
         await db.transaction(buildChanges(db, schema, table, {
@@ -349,21 +393,22 @@ function activate(context) {
         return results.submitError(err);
       }
     }
-    await openTable(ds, schema, table, view, filter);
+    await openTable(ds, database, schema, table, view, filter);
   };
 
   // ---- column DDL from the tree
 
   async function alterTable(tableNode, [sql, params]) {
     try {
-      const db = await connect(tableNode.ds);
+      const db = await connect(tableNode.ds, tableNode.database);
       await db.run(sql, params);
     } catch (err) {
       return vscode.window.showErrorMessage(err.message || String(err));
     }
     tree.fire(tableNode);
-    if (opened?.ds.id === tableNode.ds.id && opened.schema === tableNode.schema && opened.table === tableNode.name) {
-      openTable(opened.ds, opened.schema, opened.table, opened.view);
+    const same = (a, b) => ownDb(a.ds, a.database) === ownDb(b.ds, b.database);
+    if (opened?.ds.id === tableNode.ds.id && same(opened, tableNode) && opened.schema === tableNode.schema && opened.table === tableNode.name) {
+      openTable(opened.ds, opened.database, opened.schema, opened.table, opened.view);
     }
   }
   const askName = (prompt, value) => vscode.window.showInputBox({
@@ -381,7 +426,7 @@ function activate(context) {
       const item = new vscode.TreeItem(h.sql.replace(/\s+/g, ' ').slice(0, 100));
       const ds = source(h.source);
       const outcome = h.error ? 'failed' : h.rows !== undefined ? `${h.rows} rows` : `${h.affected ?? 0} affected`;
-      item.description = `${ds?.name ?? 'removed source'} · ${new Date(h.at).toLocaleString()} · ${outcome}`;
+      item.description = `${ds ? targetName(ds, h.database) : 'removed source'} · ${new Date(h.at).toLocaleString()} · ${outcome}`;
       item.tooltip = new vscode.MarkdownString().appendCodeblock(h.sql, 'sql').appendText(h.error ? `\n${h.error}` : `\n${h.ms} ms`);
       item.iconPath = h.error ? icon('error', 'errorForeground') : icon('history');
       item.contextValue = 'history';
@@ -425,8 +470,9 @@ function activate(context) {
       updateStatus();
     }),
     cmd('dataflip.newConsole', async (n) => {
-      const ds = n?.ds || (await pickSource('Open console for data source'));
-      if (ds) await newConsole(ds);
+      if (n) return newConsole(n.ds, n.database);
+      const ds = await pickSource('Open console for data source');
+      if (ds) await newConsole(ds, await pickDatabase(ds));
     }),
     cmd('dataflip.deleteConsole', async (n) => {
       const ok = await vscode.window.showWarningMessage(`Delete console "${n.uri.path.split('/').pop()}"?`, { modal: true }, 'Delete');
@@ -439,10 +485,10 @@ function activate(context) {
       if (!doc) return;
       const ds = await pickSource('Attach data source to this file');
       if (!ds) return;
-      await bind(doc, ds);
+      await bind(doc.uri, ds, await pickDatabase(ds));
       updateStatus();
     }),
-    cmd('dataflip.openTable', (n) => openTable(n.ds, n.schema, n.name, n.view)),
+    cmd('dataflip.openTable', (n) => openTable(n.ds, n.database, n.schema, n.name, n.view)),
     cmd('dataflip.addColumn', async (n) => {
       const name = await askName(`New column in ${n.schema}.${n.name}`);
       if (!name) return;
@@ -450,26 +496,26 @@ function activate(context) {
         prompt: 'Type and options, e.g. varchar(100) not null default \'\'', ignoreFocusOut: true,
         validateInput: (v) => (v.trim() ? null : 'Type is required'),
       });
-      if (type) await alterTable(n, (await connect(n.ds)).addColumn(n.schema, n.name, name.trim(), type.trim()));
+      if (type) await alterTable(n, (await connect(n.ds, n.database)).addColumn(n.schema, n.name, name.trim(), type.trim()));
     }),
     cmd('dataflip.renameColumn', async (n) => {
       const name = await askName(`Rename column ${n.col.name}`, n.col.name);
       if (name && name.trim() !== n.col.name) {
-        await alterTable(n.parent, (await connect(n.ds)).renameColumn(n.schema, n.table, n.col.name, name.trim()));
+        await alterTable(n.parent, (await connect(n.ds, n.database)).renameColumn(n.schema, n.table, n.col.name, name.trim()));
       }
     }),
     cmd('dataflip.dropColumn', async (n) => {
       const ok = await vscode.window.showWarningMessage(
         `Drop column "${n.col.name}" from ${n.schema}.${n.table}? Its data is deleted permanently.`, { modal: true }, 'Drop Column');
-      if (ok) await alterTable(n.parent, (await connect(n.ds)).dropColumn(n.schema, n.table, n.col.name));
+      if (ok) await alterTable(n.parent, (await connect(n.ds, n.database)).dropColumn(n.schema, n.table, n.col.name));
     }),
     cmd('dataflip.history.open', async (h) => {
       const ds = historySource(h);
-      if (ds) await newConsole(ds, h.sql);
+      if (ds) await newConsole(ds, h.database, h.sql);
     }),
     cmd('dataflip.history.rerun', (h) => {
       const ds = historySource(h);
-      if (ds) return runAndShow(ds, h.sql, ds.name);
+      if (ds) return runAndShow(ds, h.database, h.sql);
     }),
     cmd('dataflip.history.copy', (h) => vscode.env.clipboard.writeText(h.sql)),
     cmd('dataflip.history.clear', async () => {
@@ -479,11 +525,13 @@ function activate(context) {
       historyChanged.fire();
     }),
     cmd('dataflip.copyName', (n) =>
-      vscode.env.clipboard.writeText(n.kind === 'column' ? n.col.name : n.kind === 'schema' ? n.schema : `${n.schema}.${n.name}`)),
+      vscode.env.clipboard.writeText(
+        n.kind === 'column' ? n.col.name : n.kind === 'schema' ? n.schema : n.kind === 'database' ? n.database : `${n.schema}.${n.name}`)),
     cmd('dataflip.execute', execute),
     { dispose: () => connections.forEach((p) => p.then((c) => c.close()).catch(() => {})) },
   );
   updateStatus();
+  if (context.extensionMode === vscode.ExtensionMode.Test) return { context, provider };
 }
 
 module.exports = { activate, deactivate() {} };

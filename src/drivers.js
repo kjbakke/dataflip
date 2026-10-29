@@ -4,6 +4,7 @@
 //   preview(schema, table, { where?, orderBy? }) -> first 500 rows; where / orderBy are raw SQL typed by the user
 //   addColumn / renameColumn / dropColumn -> [sql, params?]
 //   transaction(statements)  (absent = grid editing unsupported)
+//   databases()  (present = the tree lists every database on the server; connect again with cfg.database to open one)
 
 const dq = (s) => `"${String(s).replace(/"/g, '""')}"`;
 const bq = (s) => '`' + String(s).replace(/`/g, '``') + '`';
@@ -59,6 +60,8 @@ async function postgres(cfg, password) {
     transaction: sqlTransaction(run),
     ...alterColumns(dq),
     close: () => client.end(),
+    databases: async () => (await run(
+      'select datname from pg_database where not datistemplate and datallowconn order by 1')).rows.map((r) => r[0]),
     schemas: async () => (await run(
       `select schema_name from information_schema.schemata
        where schema_name not in ('information_schema', 'pg_catalog')
@@ -173,6 +176,8 @@ async function mssql(cfg, password) {
     addColumn: (s, t, name, type) => [`alter table ${sq(s)}.${sq(t)} add ${sq(name)} ${type}`],
     renameColumn: (s, t, from, to) => ['exec sp_rename @p1, @p2, \'COLUMN\'', [`${sq(s)}.${sq(t)}.${sq(from)}`, to]],
     close: () => pool.close(),
+    databases: async () => (await run(
+      `select name from sys.databases where state_desc = 'ONLINE' and has_dbaccess(name) = 1 order by 1`)).rows.map((r) => r[0]),
     // schema_id >= 16384 are the fixed db_* role schemas
     schemas: async () => (await run(
       `select name from sys.schemas where schema_id < 16384 and name not in ('sys', 'INFORMATION_SCHEMA', 'guest') order by 1`
