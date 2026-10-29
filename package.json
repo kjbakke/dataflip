@@ -3,7 +3,7 @@
   "displayName": "DataFlip",
   "description": "Browse, query, filter and edit PostgreSQL, MySQL, SQL Server, SQLite and BigQuery right inside VS Code.",
   "version": "0.1.0",
-  "publisher": "kjbakke",
+  "publisher": "dataflip",
   "license": "MIT",
   "icon": "media/icon.png",
   "galleryBanner": {
