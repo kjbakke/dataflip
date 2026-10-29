@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "kjbakke",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kjbakke/dataflip.git"
+  },
   "engines": {
     "vscode": "^1.100.0"
   },
