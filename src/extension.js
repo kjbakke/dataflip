@@ -3,6 +3,8 @@ const crypto = require('node:crypto');
 const { DRIVERS } = require('./drivers');
 const { statementAt } = require('./splitter');
 const { ResultsView } = require('./results');
+const { cell } = require('./cell');
+const { tableQuery, DISTINCT_MAX } = require('./query');
 const { buildChanges } = require('./dml');
 
 const SOURCES = 'dataflip.sources';
@@ -239,70 +241,113 @@ function activate(context) {
     return pick?.label;
   }
 
+  // Asks for a data source's settings, pre-filled from `old` when editing.
+  // Returns { ds, password } (password undefined = keep the saved one) or undefined when cancelled.
+  async function sourceForm(driverId, old = {}) {
+    const d = DRIVERS[driverId];
+    const ds = { ...old, id: old.id || crypto.randomUUID(), driver: driverId };
+    const editing = !!old.id;
+    let password;
+    const ask = (prompt, value, extra) => vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true, ...extra });
+
+    if (d.file) {
+      const uri = await vscode.window.showOpenDialog({
+        canSelectMany: false, openLabel: 'Use Database File', defaultUri: old.file && vscode.Uri.file(old.file),
+      });
+      if (!uri) return;
+      ds.file = uri[0].fsPath;
+      ds.name = await ask('Name', old.name || uri[0].path.split('/').pop());
+      if (!ds.name) return;
+    } else if (d.cloud) {
+      ds.project = await ask('GCP project ID', old.project || '', { validateInput: (v) => (v.trim() ? null : 'Project ID is required') });
+      if (!ds.project) return;
+      const adc = 'Application Default Credentials (gcloud auth application-default login)';
+      const keyFile = 'Service account key file…';
+      const auth = await vscode.window.showQuickPick(old.keyFile ? [keyFile, adc] : [adc, keyFile], { placeHolder: 'Authentication' });
+      if (!auth) return;
+      if (auth === keyFile) {
+        const key = await vscode.window.showOpenDialog({
+          canSelectMany: false, filters: { JSON: ['json'] }, openLabel: 'Use Key File', defaultUri: old.keyFile && vscode.Uri.file(old.keyFile),
+        });
+        if (!key) return;
+        ds.keyFile = key[0].fsPath;
+      } else delete ds.keyFile;
+      ds.location = await ask('Location (blank = auto, e.g. EU, US, europe-north1)', old.location || '');
+      if (ds.location === undefined) return;
+      ds.name = await ask('Name', old.name || ds.project);
+      if (!ds.name) return;
+    } else {
+      ds.host = await ask('Host', old.host || 'localhost');
+      if (ds.host === undefined) return;
+      const port = await ask('Port', String(old.port || d.port), { validateInput: (v) => (/^\d+$/.test(v) ? null : 'Port must be a number') });
+      if (port === undefined) return;
+      ds.port = Number(port);
+      ds.database = await ask('Database', old.database ?? d.database ?? '');
+      if (ds.database === undefined) return;
+      ds.user = await ask('User', old.user ?? d.user);
+      if (ds.user === undefined) return;
+      password = await ask('Password', '', { password: true, placeHolder: editing ? 'Leave empty to keep the saved password' : undefined });
+      if (password === undefined) return;
+      if (editing && !password) password = undefined;
+      const noSsl = 'No SSL';
+      const ssl = 'SSL (skip certificate verification)';
+      const pick = await vscode.window.showQuickPick(old.ssl ? [ssl, noSsl] : [noSsl, ssl], { placeHolder: 'SSL' });
+      if (!pick) return;
+      ds.ssl = pick === ssl;
+      ds.name = await ask('Name', old.name || `${ds.database || ds.host}@${ds.host}`);
+      if (!ds.name) return;
+    }
+    return { ds, password };
+  }
+
+  // Test connection before saving, like Rider's "Test Connection"
+  async function testConnection(ds, password) {
+    try {
+      const conn = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Connecting to ${ds.name}…` },
+        () => DRIVERS[ds.driver].connect(ds, password));
+      await conn.close();
+      return true;
+    } catch (err) {
+      return !!(await vscode.window.showErrorMessage(`Connection failed: ${err.message}`, { modal: true }, 'Save Anyway'));
+    }
+  }
+
   async function addSource() {
     const driver = await vscode.window.showQuickPick(
       Object.entries(DRIVERS).map(([id, d]) => ({ label: d.label, id })),
       { placeHolder: 'Database type' });
     if (!driver) return;
-    const d = DRIVERS[driver.id];
-    const ds = { id: crypto.randomUUID(), driver: driver.id };
-    let password;
-    const ask = (prompt, value, extra) => vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true, ...extra });
-
-    if (d.file) {
-      const uri = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Use Database File' });
-      if (!uri) return;
-      ds.file = uri[0].fsPath;
-      ds.name = uri[0].path.split('/').pop();
-    } else if (d.cloud) {
-      ds.project = await ask('GCP project ID', '', { validateInput: (v) => (v.trim() ? null : 'Project ID is required') });
-      if (!ds.project) return;
-      const auth = await vscode.window.showQuickPick(
-        ['Application Default Credentials (gcloud auth application-default login)', 'Service account key file…'],
-        { placeHolder: 'Authentication' });
-      if (!auth) return;
-      if (auth.startsWith('Service')) {
-        const key = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { JSON: ['json'] }, openLabel: 'Use Key File' });
-        if (!key) return;
-        ds.keyFile = key[0].fsPath;
-      }
-      ds.location = await ask('Location (blank = auto, e.g. EU, US, europe-north1)', '');
-      if (ds.location === undefined) return;
-      ds.name = await ask('Name', ds.project);
-      if (!ds.name) return;
-    } else {
-      ds.host = await ask('Host', 'localhost');
-      if (ds.host === undefined) return;
-      const port = await ask('Port', String(d.port), { validateInput: (v) => (/^\d+$/.test(v) ? null : 'Port must be a number') });
-      if (port === undefined) return;
-      ds.port = Number(port);
-      ds.database = await ask('Database', d.database || '');
-      if (ds.database === undefined) return;
-      ds.user = await ask('User', d.user);
-      if (ds.user === undefined) return;
-      password = await ask('Password', '', { password: true });
-      if (password === undefined) return;
-      const ssl = await vscode.window.showQuickPick(['No SSL', 'SSL (skip certificate verification)'], { placeHolder: 'SSL' });
-      if (!ssl) return;
-      ds.ssl = ssl !== 'No SSL';
-      ds.name = await ask('Name', `${ds.database || ds.host}@${ds.host}`);
-      if (!ds.name) return;
-    }
-
-    // Test connection before saving, like Rider's "Test Connection"
-    try {
-      const conn = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Connecting to ${ds.name}…` },
-        () => d.connect(ds, password));
-      await conn.close();
-    } catch (err) {
-      const keep = await vscode.window.showErrorMessage(`Connection failed: ${err.message}`, { modal: true }, 'Save Anyway');
-      if (!keep) return;
-    }
-    if (password) await secrets.store(secretKey(ds.id), password);
-    await globalState.update(SOURCES, [...sources(), ds]);
+    const form = await sourceForm(driver.id);
+    if (!form || !(await testConnection(form.ds, form.password))) return;
+    if (form.password) await secrets.store(secretKey(form.ds.id), form.password);
+    await globalState.update(SOURCES, [...sources(), form.ds]);
     tree.fire();
-    return ds;
+    return form.ds;
+  }
+
+  // Same id afterwards, so consoles, history and file bindings stay attached.
+  async function editSource(old) {
+    const form = await sourceForm(old.driver, old);
+    if (!form) return;
+    const password = form.password ?? (await secrets.get(secretKey(old.id)));
+    if (!(await testConnection(form.ds, password))) return;
+    await disconnect(old);
+    if (form.password) await secrets.store(secretKey(old.id), form.password);
+    await globalState.update(SOURCES, sources().map((s) => (s.id === old.id ? form.ds : s)));
+    tree.fire();
+    updateStatus();
+  }
+
+  async function duplicateSource(old) {
+    const copy = { ...old, id: crypto.randomUUID(), name: `${old.name} (copy)` };
+    const password = await secrets.get(secretKey(old.id));
+    if (password) await secrets.store(secretKey(copy.id), password);
+    const all = sources();
+    const at = all.findIndex((s) => s.id === old.id) + 1;
+    await globalState.update(SOURCES, [...all.slice(0, at), copy, ...all.slice(at)]);
+    tree.fire();
+    return copy;
   }
 
   async function execute() {
@@ -354,31 +399,69 @@ function activate(context) {
 
   // ---- Open Table: filterable; editable when the driver has transactions and the table a primary key
 
-  let opened; // { ds, database, schema, table, view, columns, rows, pk } behind the grid, cleared by any other result
-  async function openTable(ds, database, schema, table, view, filter = {}) {
+  // opened = what is behind the grid, cleared by any other result:
+  // { ds, database, schema, table, view, columns, rows, pk, filter: { where, orderBy }, filters, distinct }
+  let opened;
+  async function openTable(ds, database, schema, table, view, filter = {}, filters = {}) {
     const title = (ownDb(ds, database) ? `${database}.` : '') + `${schema}.${table}`;
     opened = undefined;
     results.running(title);
     try {
       const db = await connect(ds, database);
       const t0 = Date.now();
-      const [res, cols] = await Promise.all([db.run(db.preview(schema, table, filter)), db.columns(schema, table)]);
+      const { sql, params } = tableQuery(db, { schema, table, ...filter, filters });
+      const [res, cols] = await Promise.all([db.run(sql, params), db.columns(schema, table)]);
       const pk = cols.filter((c) => c.pk).map((c) => c.name);
       const readOnly = !db.transaction ? `Read-only: editing ${DRIVERS[ds.driver].label} tables is not supported`
         : view ? 'Read-only: view'
         : !pk.length ? 'Read-only: table has no primary key'
         : undefined;
-      opened = { ds, database, schema, table, view, columns: res.columns, rows: res.rows, pk };
-      results.result(title, res, Date.now() - t0, { pk, quoted: res.columns.map(db.quote), ...filter, readOnly });
+      opened = { ds, database, schema, table, view, columns: res.columns, rows: res.rows, pk, filter, filters };
+      results.result(title, res, Date.now() - t0, {
+        pk, quoted: res.columns.map(db.quote), ...filter, filtered: Object.keys(filters), readOnly,
+      });
     } catch (err) {
       results.error(title, err);
     }
   }
 
   results.onAction = async (msg) => {
-    if (!opened) return;
-    const { ds, database, schema, table, view } = opened;
+    const o = opened;
+    if (!o) return;
+    const { ds, database, schema, table, view } = o;
+
+    // Excel-style column filter: the value list comes from the database under every other filter
+    if (msg.type === 'distinct') {
+      try {
+        const db = await connect(ds, database);
+        const q = tableQuery(db, { schema, table, ...o.filter, filters: o.filters }, msg.col);
+        const res = await db.run(q.sql, q.params);
+        const chosen = o.filters[msg.col];
+        const keys = chosen && new Set([...chosen.values.map(cell), ...(chosen.nulls ? [null] : [])]);
+        o.distinct = { col: msg.col, raws: res.rows.map((r) => r[0]) };
+        results.notify({ distinct: {
+          col: msg.col,
+          truncated: res.rows.length >= DISTINCT_MAX,
+          items: res.rows.map(([v, n]) => ({ label: cell(v), count: Number(cell(n)), checked: !keys || keys.has(cell(v)) })),
+        } });
+      } catch (err) {
+        results.notify({ distinct: { col: msg.col, error: err.message || String(err) } });
+      }
+      return;
+    }
+
     const filter = { where: msg.where || undefined, orderBy: msg.orderBy || undefined };
+    let filters = o.filters;
+    if (msg.type === 'colFilter') {
+      filters = { ...filters };
+      if (msg.selected === null) delete filters[msg.col];
+      else {
+        if (o.distinct?.col !== msg.col) return;
+        // raw values as the driver returned them, so dates and big numbers bind exactly
+        const raws = msg.selected.map((i) => o.distinct.raws[i]);
+        filters[msg.col] = { values: raws.filter((v) => v !== null), nulls: raws.includes(null) };
+      }
+    }
     if (msg.type === 'submit') {
       try {
         const db = await connect(ds, database);
@@ -393,7 +476,7 @@ function activate(context) {
         return results.submitError(err);
       }
     }
-    await openTable(ds, database, schema, table, view, filter);
+    await openTable(ds, database, schema, table, view, filter, filters);
   };
 
   // ---- column DDL from the tree
@@ -408,7 +491,7 @@ function activate(context) {
     tree.fire(tableNode);
     const same = (a, b) => ownDb(a.ds, a.database) === ownDb(b.ds, b.database);
     if (opened?.ds.id === tableNode.ds.id && same(opened, tableNode) && opened.schema === tableNode.schema && opened.table === tableNode.name) {
-      openTable(opened.ds, opened.database, opened.schema, opened.table, opened.view);
+      openTable(opened.ds, opened.database, opened.schema, opened.table, opened.view, opened.filter, opened.filters);
     }
   }
   const askName = (prompt, value) => vscode.window.showInputBox({
@@ -454,6 +537,8 @@ function activate(context) {
     vscode.workspace.onDidOpenTextDocument(updateStatus),
 
     cmd('dataflip.addSource', addSource),
+    cmd('dataflip.editSource', (n) => editSource(n.ds)),
+    cmd('dataflip.duplicateSource', (n) => duplicateSource(n.ds)),
     cmd('dataflip.refresh', (n) => tree.fire(n)),
     cmd('dataflip.disconnect', async (n) => {
       await disconnect(n.ds);
@@ -531,7 +616,7 @@ function activate(context) {
     { dispose: () => connections.forEach((p) => p.then((c) => c.close()).catch(() => {})) },
   );
   updateStatus();
-  if (context.extensionMode === vscode.ExtensionMode.Test) return { context, provider };
+  if (context.extensionMode === vscode.ExtensionMode.Test) return { context, provider, results };
 }
 
 module.exports = { activate, deactivate() {} };

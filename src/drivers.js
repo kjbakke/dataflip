@@ -1,7 +1,7 @@
 // Each driver exposes the same shape:
 //   run(sql, params?) -> { columns: string[], rows: any[][], affected?: number, total?: number }
 //   schemas(), tables(schema), columns(schema, table), quote(ident), param(n), close()
-//   preview(schema, table, { where?, orderBy? }) -> first 500 rows; where / orderBy are raw SQL typed by the user
+//   limit(selectSql, n) -> the dialect's row limit (LIMIT n, or TOP n on SQL Server)
 //   addColumn / renameColumn / dropColumn -> [sql, params?]
 //   transaction(statements)  (absent = grid editing unsupported)
 //   databases()  (present = the tree lists every database on the server; connect again with cfg.database to open one)
@@ -9,9 +9,7 @@
 const dq = (s) => `"${String(s).replace(/"/g, '""')}"`;
 const bq = (s) => '`' + String(s).replace(/`/g, '``') + '`';
 const sq = (s) => `[${String(s).replace(/]/g, ']]')}]`;
-const clauses = ({ where, orderBy } = {}) => (where ? ` where ${where}` : '') + (orderBy ? ` order by ${orderBy}` : '');
-const limit500 = (quote) => (schema, table, filter) =>
-  `select * from ${quote(schema)}.${quote(table)}${clauses(filter)} limit 500`;
+const limit = (sql, n) => `${sql} limit ${n}`;
 const qmark = () => '?';
 
 const alterColumns = (quote) => ({
@@ -39,10 +37,14 @@ const sqlTransaction = (run, begin = 'begin') =>
   inTransaction(() => run(begin), () => run('commit'), () => run('rollback'), run);
 
 async function postgres(cfg, password) {
-  const { Client } = require('pg');
+  const { Client, types } = require('pg');
+  // date / timestamp / timestamptz stay as Postgres prints them: no local-timezone shift in the grid,
+  // and the exact text (microseconds included) binds back for filters and edits
+  const asText = new Set([1082, 1114, 1184]);
   const client = new Client({
     host: cfg.host, port: cfg.port, database: cfg.database, user: cfg.user, password,
     ssl: cfg.ssl ? { rejectUnauthorized: false } : undefined,
+    types: { getTypeParser: (oid, format) => (asText.has(oid) ? (v) => v : types.getTypeParser(oid, format)) },
   });
   await client.connect();
   const run = async (sql, params) => {
@@ -56,7 +58,7 @@ async function postgres(cfg, password) {
     run,
     quote: dq,
     param: (n) => `$${n}`,
-    preview: limit500(dq),
+    limit,
     transaction: sqlTransaction(run),
     ...alterColumns(dq),
     close: () => client.end(),
@@ -88,6 +90,7 @@ async function mysql(cfg, password) {
   const conn = await mysql2.createConnection({
     host: cfg.host, port: cfg.port, database: cfg.database || undefined, user: cfg.user, password,
     ssl: cfg.ssl ? { rejectUnauthorized: false } : undefined,
+    dateStrings: true, // same reason as Postgres: no timezone shift, exact round trip
   });
   const run = async (sql, params) => {
     const [rows, fields] = await conn.query({ sql, values: params, rowsAsArray: true });
@@ -99,7 +102,7 @@ async function mysql(cfg, password) {
     run,
     quote: bq,
     param: qmark,
-    preview: limit500(bq),
+    limit,
     transaction: sqlTransaction(run, 'start transaction'),
     ...alterColumns(bq),
     close: () => conn.end(),
@@ -131,7 +134,7 @@ async function sqlite(cfg) {
     run,
     quote: dq,
     param: qmark,
-    preview: limit500(dq),
+    limit,
     transaction: sqlTransaction(run),
     ...alterColumns(dq),
     close: async () => db.close(),
@@ -167,7 +170,7 @@ async function mssql(cfg, password) {
     run,
     quote: sq,
     param: (n) => `@p${n}`,
-    preview: (schema, table, filter) => `select top 500 * from ${sq(schema)}.${sq(table)}${clauses(filter)}`,
+    limit: (sql, n) => sql.replace(/^select /i, `select top ${n} `),
     transaction: (stmts) => {
       const tx = new sql.Transaction(pool);
       return inTransaction(() => tx.begin(), () => tx.commit(), () => tx.rollback(), runOn(tx))(stmts);
@@ -224,7 +227,7 @@ async function bigquery(cfg) {
     run,
     quote: bqq,
     param: qmark,
-    preview: limit500(bqq),
+    limit,
     ...alterColumns(bqq),
     close: async () => {},
     schemas: async () => (await client.getDatasets())[0].map((d) => d.id).sort(),

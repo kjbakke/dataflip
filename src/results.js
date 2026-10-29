@@ -1,21 +1,9 @@
 const vscode = require('vscode');
 const crypto = require('node:crypto');
+const { cell } = require('./cell');
 
 // shortcut: renders at most this many rows, all rows are still fetched; add cursor paging if big results matter
 const MAX_ROWS = 1000;
-
-function cell(v) {
-  if (v === null || v === undefined) return null;
-  if (v instanceof Date) return isNaN(v) ? String(v) : v.toISOString();
-  if (v instanceof Uint8Array) {
-    const hex = Buffer.from(v.subarray(0, 64)).toString('hex');
-    return '0x' + hex.toUpperCase() + (v.length > 64 ? '…' : '');
-  }
-  if (typeof v === 'bigint') return v.toString();
-  if (typeof v === 'object' && typeof v.value === 'string') return v.value; // BigQuery INT64/DATE/TIMESTAMP wrappers
-  if (typeof v === 'object') return JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && typeof x.value === 'string' ? x.value : x));
-  return String(v);
-}
 
 class ResultsView {
   constructor() {
@@ -57,9 +45,14 @@ class ResultsView {
     });
   }
 
+  // messages that update the open grid in place (not replayed when the view reloads)
+  notify(msg) {
+    this.view?.webview.postMessage(msg);
+  }
+
   // tells the grid a submit failed without dropping its pending edits
   submitError(err) {
-    this.view?.webview.postMessage({ submitError: err?.message || String(err) });
+    this.notify({ submitError: err?.message || String(err) });
   }
 
   async post(msg) {
@@ -106,6 +99,18 @@ function html(nonce) {
   tr.new td { background: var(--vscode-diffEditor-insertedTextBackground); }
   tr.del td { background: var(--vscode-diffEditor-removedTextBackground); text-decoration: line-through; }
   td.sel { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
+  th .fbtn { margin-left: 6px; padding: 0 3px; cursor: pointer; color: var(--vscode-descriptionForeground); font-weight: normal; }
+  th .fbtn:hover { background: var(--vscode-toolbar-hoverBackground); }
+  th .fbtn.on { color: var(--vscode-focusBorder); }
+  #pop { position: absolute; z-index: 5; width: 260px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background, Canvas)); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,.3)); padding: 6px; font-family: var(--vscode-font-family); font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+  #pop[hidden] { display: none; }
+  #pop .row { display: flex; gap: 4px; }
+  #pop .row button { flex: 1; }
+  #pop input[type=search] { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); padding: 2px 4px; }
+  #pop .list { max-height: 240px; overflow: auto; border: 1px solid var(--vscode-panel-border); padding: 2px 0; }
+  #pop label { display: flex; gap: 6px; padding: 1px 6px; color: var(--vscode-foreground); white-space: nowrap; }
+  #pop label .cnt { margin-left: auto; color: var(--vscode-descriptionForeground); }
+  #pop label .lbl { overflow: hidden; text-overflow: ellipsis; }
   td input { width: 100%; min-width: 80px; box-sizing: border-box; font: inherit; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: none; outline: none; padding: 0; }
 </style></head>
 <body>
@@ -124,6 +129,14 @@ function html(nonce) {
   </div>
 </div>
 <div id="grid"></div>
+<div id="pop" hidden>
+  <div class="row"><button id="sortAsc">Sort A → Z</button><button id="sortDesc">Sort Z → A</button></div>
+  <input type="search" id="popSearch" placeholder="Search">
+  <label><input type="checkbox" id="popAll"> <b>(Select all)</b></label>
+  <div class="list" id="popList"></div>
+  <span class="muted" id="popNote"></span>
+  <div class="row"><button id="popOk" class="primary">OK</button><button id="popClear">Clear filter</button><button id="popCancel">Cancel</button></div>
+</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
@@ -133,6 +146,11 @@ function html(nonce) {
 
   let m = null;          // last result message
   let edits, deleted, inserted, sel, status;
+  // Excel-style filters on console results run here: col -> Set of shown values (NULL_KEY for null).
+  // Open Table filters run in the database instead; m.table.filtered names the filtered columns.
+  let localFilters = new Map(), localSort = null;
+  const NULL_KEY = '\u0000null';
+  const keyOf = (v) => (v === null ? NULL_KEY : v);
 
   function reset() {
     edits = new Map();   // row -> Map(col -> value)
@@ -151,6 +169,9 @@ function html(nonce) {
 
   window.addEventListener('message', ({ data }) => {
     if ('submitError' in data) { status = { err: data.submitError }; return renderBar(); }
+    if ('distinct' in data) return fillPop(data.distinct);
+    if (!data.table || !m?.table || data.title !== m.title) { localFilters = new Map(); localSort = null; }
+    closePop();
     m = data;
     reset();
     tools.hidden = !m.table;
@@ -190,6 +211,11 @@ function html(nonce) {
       const pk = m.table?.pk.includes(c);
       const th = el('th', (pk ? '🔑 ' : '') + c + sortMark(i), m.table ? 'sortable' : '');
       th.dataset.c = i;
+      const on = m.table ? (m.table.filtered || []).includes(c) : localFilters.has(i);
+      const f = el('span', on ? '⧩' : '▾', 'fbtn' + (on ? ' on' : ''));
+      f.title = on ? 'Filtered: click to change' : 'Filter';
+      f.dataset.c = i;
+      th.append(f);
       head.append(th);
     });
     const thead = el('thead');
@@ -197,8 +223,7 @@ function html(nonce) {
     table.append(thead);
 
     const body = el('tbody');
-    const total = m.rows.length + inserted.length;
-    for (let r = 0; r < total; r++) {
+    for (const r of visibleRows()) {
       const isNew = r >= m.rows.length;
       const tr = el('tr', undefined, isNew ? 'new' : deleted.has(r) ? 'del' : '');
       tr.append(el('td', isNew ? '+' : String(r + 1), 'num'));
@@ -218,9 +243,112 @@ function html(nonce) {
     grid.append(table);
   }
 
+  // row indices to draw: console results pass through local filters and sort; new rows go last
+  function visibleRows() {
+    let rows = m.rows.map((_, r) => r);
+    if (!m.table) {
+      for (const [c, keep] of localFilters) rows = rows.filter((r) => keep.has(keyOf(m.rows[r][c])));
+      if (localSort) {
+        const { c, dir } = localSort;
+        rows.sort((a, b) => dir * compare(m.rows[a][c], m.rows[b][c]));
+      }
+    }
+    return rows.concat(inserted.map((_, i) => m.rows.length + i));
+  }
+  const compare = (a, b) => (a === b ? 0 : a === null ? 1 : b === null ? -1 : a.localeCompare(b, undefined, { numeric: true }));
+
+  // ---- filter popover
+
+  const pop = $('pop');
+  let popCol = null, popItems = []; // items: { label, count, checked }
+  function openPop(c, anchor) {
+    popCol = c;
+    $('popSearch').value = '';
+    $('popNote').textContent = '';
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.max(0, Math.min(r.left + scrollX, document.documentElement.clientWidth - 270)) + 'px';
+    pop.style.top = r.bottom + scrollY + 2 + 'px';
+    pop.hidden = false;
+    if (m.table) {
+      $('popList').replaceChildren(el('span', 'Loading values…', 'muted'));
+      vscode.postMessage({ type: 'distinct', col: m.columns[c], where: $('where').value.trim() });
+    } else {
+      const counts = new Map();
+      for (const row of m.rows) counts.set(keyOf(row[c]), (counts.get(keyOf(row[c])) || 0) + 1);
+      const keep = localFilters.get(c);
+      fillPop({
+        col: m.columns[c],
+        items: [...counts].map(([k, count]) => ({ label: k === NULL_KEY ? null : k, count, checked: !keep || keep.has(k) }))
+          .sort((a, b) => compare(a.label, b.label)),
+      });
+    }
+    $('popSearch').focus();
+  }
+  function closePop() { pop.hidden = true; popCol = null; }
+  function fillPop(d) {
+    if (popCol === null || d.col !== m.columns[popCol]) return;
+    if (d.error) return $('popList').replaceChildren(el('span', d.error, 'err'));
+    popItems = d.items;
+    $('popNote').textContent = d.truncated ? 'Showing the first ' + d.items.length + ' values' : '';
+    drawPopList();
+  }
+  const matches = (it) => { const q = $('popSearch').value.toLowerCase(); return !q || (it.label ?? '<null>').toLowerCase().includes(q); };
+  function drawPopList() {
+    const list = $('popList');
+    list.replaceChildren();
+    const shown = popItems.filter(matches);
+    shown.forEach((it) => {
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = it.checked;
+      cb.addEventListener('change', () => { it.checked = cb.checked; syncAll(); });
+      const lab = el('label');
+      lab.append(cb, el('span', it.label ?? '<null>', 'lbl' + (it.label === null ? ' null' : '')), el('span', String(it.count), 'cnt'));
+      list.append(lab);
+    });
+    syncAll();
+  }
+  function syncAll() {
+    const shown = popItems.filter(matches);
+    $('popAll').checked = shown.length > 0 && shown.every((it) => it.checked);
+    $('popAll').indeterminate = shown.some((it) => it.checked) && !$('popAll').checked;
+  }
+  $('popSearch').addEventListener('input', drawPopList);
+  $('popAll').addEventListener('change', () => { popItems.filter(matches).forEach((it) => (it.checked = $('popAll').checked)); drawPopList(); });
+  $('popCancel').addEventListener('click', closePop);
+  $('popOk').addEventListener('click', () => {
+    // like Excel: with a search typed, only the checked matches stay
+    const keep = popItems.map((it, i) => (it.checked && matches(it) ? i : -1)).filter((i) => i >= 0);
+    applyFilter(keep.length === popItems.length ? null : keep);
+  });
+  $('popClear').addEventListener('click', () => applyFilter(null));
+  $('sortAsc').addEventListener('click', () => sortBy(1));
+  $('sortDesc').addEventListener('click', () => sortBy(-1));
+
+  // keep: indexes into popItems, or null to drop this column's filter
+  function applyFilter(keep) {
+    const c = popCol;
+    closePop();
+    if (m.table) {
+      if (!guardPending()) return;
+      return vscode.postMessage({ type: 'colFilter', col: m.columns[c], selected: keep, where: $('where').value.trim(), orderBy: $('orderBy').value.trim() });
+    }
+    if (keep === null) localFilters.delete(c);
+    else localFilters.set(c, new Set(keep.map((i) => keyOf(popItems[i].label))));
+    render();
+  }
+  function sortBy(dir) {
+    const c = popCol;
+    closePop();
+    if (m.table) return reload(undefined, m.table.quoted[c] + (dir > 0 ? ' asc' : ' desc'));
+    localSort = { c, dir };
+    render();
+  }
+  document.addEventListener('mousedown', (e) => { if (!pop.hidden && !pop.contains(e.target) && !e.target.classList.contains('fbtn')) closePop(); });
+
   // ORDER BY from header clicks: asc -> desc -> none
   function sortMark(c) {
-    if (!m.table) return '';
+    if (!m.table) return localSort?.c === c ? (localSort.dir > 0 ? ' ▲' : ' ▼') : '';
     const q = m.table.quoted[c];
     const o = (m.table.orderBy || '').trim();
     return o === q + ' asc' ? ' ▲' : o === q + ' desc' ? ' ▼' : '';
@@ -293,6 +421,10 @@ function html(nonce) {
   }
 
   grid.addEventListener('click', (e) => {
+    if (e.target.classList.contains('fbtn')) {
+      const c = +e.target.dataset.c;
+      return popCol === c ? closePop() : openPop(c, e.target.closest('th'));
+    }
     const th = e.target.closest('th.sortable');
     if (th) {
       const q = m.table.quoted[+th.dataset.c];
@@ -325,6 +457,7 @@ function html(nonce) {
   $('submit').addEventListener('click', submit);
 
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !pop.hidden) return closePop();
     if (e.target.tagName === 'INPUT') return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key === 'Enter') { e.preventDefault(); submit(); }
