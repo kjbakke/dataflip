@@ -3,13 +3,18 @@ const crypto = require('node:crypto');
 const { DRIVERS } = require('./drivers');
 const { statementAt } = require('./splitter');
 const { ResultsView } = require('./results');
+const { buildChanges } = require('./dml');
 
 const SOURCES = 'dataflip.sources';
 const BINDINGS = 'dataflip.bindings';
+const HISTORY = 'dataflip.history';
+const HISTORY_MAX = 500;
 const secretKey = (id) => `dataflip.password.${id}`;
 
 function activate(context) {
-  const { globalState, workspaceState, secrets } = context;
+  const { globalState, secrets } = context;
+  // consoles are real files, one folder per data source: <globalStorage>/consoles/<source id>/<timestamp>.sql
+  const consolesDir = vscode.Uri.joinPath(context.globalStorageUri, 'consoles');
   const connections = new Map(); // source id -> Promise<driver>
   const sourceNodes = new Map(); // source id -> tree node, reused so the node can be refreshed by identity
   const results = new ResultsView();
@@ -74,6 +79,22 @@ function activate(context) {
           item.iconPath = icon(n.view ? 'eye' : 'table');
           return item;
         }
+        case 'consoles': {
+          const item = new vscode.TreeItem('consoles', vscode.TreeItemCollapsibleState.Collapsed);
+          item.id = `${n.ds.id}/consoles`;
+          item.iconPath = icon('terminal');
+          item.description = String(n.files.length);
+          return item;
+        }
+        case 'console': {
+          const item = new vscode.TreeItem(n.uri.path.split('/').pop().replace(/\.sql$/, ''));
+          item.id = n.uri.toString();
+          item.contextValue = 'console';
+          item.resourceUri = n.uri;
+          item.iconPath = icon('file-code');
+          item.command = { command: 'vscode.open', title: 'Open Console', arguments: [n.uri] };
+          return item;
+        }
         case 'column': {
           const item = new vscode.TreeItem(n.col.name);
           item.id = `${n.ds.id}/${n.schema}/${n.table}/${n.col.name}`;
@@ -103,8 +124,13 @@ function activate(context) {
       try {
         const db = await connect(n.ds);
         switch (n.kind) {
-          case 'source':
-            return (await db.schemas()).map((schema) => ({ kind: 'schema', ds: n.ds, schema }));
+          case 'source': {
+            const schemas = (await db.schemas()).map((schema) => ({ kind: 'schema', ds: n.ds, schema }));
+            const files = await consoleFiles(n.ds);
+            return files.length ? [{ kind: 'consoles', ds: n.ds, files }, ...schemas] : schemas;
+          }
+          case 'consoles':
+            return n.files.map((uri) => ({ kind: 'console', ds: n.ds, uri }));
           case 'schema': {
             const all = await db.tables(n.schema);
             return [false, true]
@@ -114,7 +140,7 @@ function activate(context) {
           case 'folder':
             return n.items.map((t) => ({ kind: 'table', ds: n.ds, schema: n.schema, ...t }));
           case 'table':
-            return (await db.columns(n.schema, n.name)).map((col) => ({ kind: 'column', ds: n.ds, schema: n.schema, table: n.name, col }));
+            return (await db.columns(n.schema, n.name)).map((col) => ({ kind: 'column', ds: n.ds, schema: n.schema, table: n.name, col, parent: n }));
         }
       } catch (err) {
         return [{ kind: 'error', message: err.message || String(err) }];
@@ -125,9 +151,28 @@ function activate(context) {
 
   // ---- console <-> data source binding, shown in the status bar
 
-  const bindings = () => workspaceState.get(BINDINGS, {});
-  const boundSource = (doc) => source(bindings()[doc.uri.toString()]);
-  const bind = (doc, ds) => workspaceState.update(BINDINGS, { ...bindings(), [doc.uri.toString()]: ds.id });
+  const bindings = () => globalState.get(BINDINGS, {});
+  const consoleOwner = (uri) => uri.toString().startsWith(consolesDir.toString() + '/') && uri.path.split('/').slice(-2)[0];
+  const boundSource = (doc) => source(bindings()[doc.uri.toString()] || consoleOwner(doc.uri));
+  const bind = (doc, ds) => globalState.update(BINDINGS, { ...bindings(), [doc.uri.toString()]: ds.id });
+
+  async function consoleFiles(ds) {
+    const dir = vscode.Uri.joinPath(consolesDir, ds.id);
+    const entries = await vscode.workspace.fs.readDirectory(dir).then((e) => e, () => []);
+    return entries
+      .filter(([name, type]) => type === vscode.FileType.File && name.endsWith('.sql'))
+      .map(([name]) => vscode.Uri.joinPath(dir, name))
+      .sort((a, b) => b.path.localeCompare(a.path)); // timestamp names: newest first
+  }
+
+  async function newConsole(ds, content = '') {
+    const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '.');
+    const uri = vscode.Uri.joinPath(consolesDir, ds.id, `${stamp}.sql`);
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+    await vscode.window.showTextDocument(uri);
+    tree.fire(sourceNodes.get(ds.id));
+    updateStatus();
+  }
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'dataflip.attachSource';
@@ -243,18 +288,108 @@ function activate(context) {
     await runAndShow(ds, sql, ds.name);
   }
 
-  // sql may be a function of the connected driver, for identifier quoting
   async function runAndShow(ds, sql, title) {
+    opened = undefined;
+    results.running(title);
+    const entry = { sql, source: ds.id, at: Date.now() };
+    try {
+      const db = await connect(ds);
+      const t0 = Date.now();
+      const res = await db.run(sql);
+      entry.ms = Date.now() - t0;
+      entry.rows = res.columns.length ? res.total ?? res.rows.length : undefined;
+      entry.affected = res.affected;
+      results.result(title, res, entry.ms);
+    } catch (err) {
+      entry.error = err.message || String(err);
+      results.error(title, err);
+    }
+    await globalState.update(HISTORY, [entry, ...history()].slice(0, HISTORY_MAX));
+    historyChanged.fire();
+  }
+
+  // ---- Open Table: filterable; editable when the driver has transactions and the table a primary key
+
+  let opened; // { ds, schema, table, view, columns, rows, pk } behind the grid, cleared by any other result
+  async function openTable(ds, schema, table, view, filter = {}) {
+    const title = `${schema}.${table}`;
+    opened = undefined;
     results.running(title);
     try {
       const db = await connect(ds);
       const t0 = Date.now();
-      const res = await db.run(typeof sql === 'function' ? sql(db) : sql);
-      results.result(title, res, Date.now() - t0);
+      const [res, cols] = await Promise.all([db.run(db.preview(schema, table, filter)), db.columns(schema, table)]);
+      const pk = cols.filter((c) => c.pk).map((c) => c.name);
+      const readOnly = !db.transaction ? `Read-only: editing ${DRIVERS[ds.driver].label} tables is not supported`
+        : view ? 'Read-only: view'
+        : !pk.length ? 'Read-only: table has no primary key'
+        : undefined;
+      opened = { ds, schema, table, view, columns: res.columns, rows: res.rows, pk };
+      results.result(title, res, Date.now() - t0, { pk, quoted: res.columns.map(db.quote), ...filter, readOnly });
     } catch (err) {
       results.error(title, err);
     }
   }
+
+  results.onAction = async (msg) => {
+    if (!opened) return;
+    const { ds, schema, table, view } = opened;
+    const filter = { where: msg.where || undefined, orderBy: msg.orderBy || undefined };
+    if (msg.type === 'submit') {
+      try {
+        const db = await connect(ds);
+        const keyOf = (row) => Object.fromEntries(opened.pk.map((c) => [c, opened.rows[row][opened.columns.indexOf(c)]]));
+        const { deletes, updates, inserts } = msg.changes;
+        await db.transaction(buildChanges(db, schema, table, {
+          deletes: deletes.map((row) => ({ key: keyOf(row) })),
+          updates: updates.map(({ row, values }) => ({ key: keyOf(row), values })),
+          inserts,
+        }));
+      } catch (err) {
+        return results.submitError(err);
+      }
+    }
+    await openTable(ds, schema, table, view, filter);
+  };
+
+  // ---- column DDL from the tree
+
+  async function alterTable(tableNode, [sql, params]) {
+    try {
+      const db = await connect(tableNode.ds);
+      await db.run(sql, params);
+    } catch (err) {
+      return vscode.window.showErrorMessage(err.message || String(err));
+    }
+    tree.fire(tableNode);
+    if (opened?.ds.id === tableNode.ds.id && opened.schema === tableNode.schema && opened.table === tableNode.name) {
+      openTable(opened.ds, opened.schema, opened.table, opened.view);
+    }
+  }
+  const askName = (prompt, value) => vscode.window.showInputBox({
+    prompt, value, ignoreFocusOut: true, validateInput: (v) => (v.trim() ? null : 'Name is required'),
+  });
+
+  // ---- query history (console statements, newest first)
+
+  const history = () => globalState.get(HISTORY, []);
+  const historyChanged = new vscode.EventEmitter();
+  const historyProvider = {
+    onDidChangeTreeData: historyChanged.event,
+    getChildren: () => history(),
+    getTreeItem(h) {
+      const item = new vscode.TreeItem(h.sql.replace(/\s+/g, ' ').slice(0, 100));
+      const ds = source(h.source);
+      const outcome = h.error ? 'failed' : h.rows !== undefined ? `${h.rows} rows` : `${h.affected ?? 0} affected`;
+      item.description = `${ds?.name ?? 'removed source'} · ${new Date(h.at).toLocaleString()} · ${outcome}`;
+      item.tooltip = new vscode.MarkdownString().appendCodeblock(h.sql, 'sql').appendText(h.error ? `\n${h.error}` : `\n${h.ms} ms`);
+      item.iconPath = h.error ? icon('error', 'errorForeground') : icon('history');
+      item.contextValue = 'history';
+      item.command = { command: 'dataflip.history.open', title: 'Open in Console', arguments: [h] };
+      return item;
+    },
+  };
+  const historySource = (h) => source(h.source) || (vscode.window.showWarningMessage('That data source was removed.'), undefined);
 
   const flash = vscode.window.createTextEditorDecorationType({
     backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
@@ -267,7 +402,9 @@ function activate(context) {
     status,
     flash,
     vscode.window.createTreeView('dataflip.sources', { treeDataProvider: provider, showCollapseAll: true }),
-    vscode.window.registerWebviewViewProvider('dataflip.results', results),
+    historyChanged,
+    vscode.window.createTreeView('dataflip.history', { treeDataProvider: historyProvider }),
+    vscode.window.registerWebviewViewProvider('dataflip.results', results, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.window.onDidChangeActiveTextEditor(updateStatus),
     vscode.workspace.onDidOpenTextDocument(updateStatus),
 
@@ -289,11 +426,13 @@ function activate(context) {
     }),
     cmd('dataflip.newConsole', async (n) => {
       const ds = n?.ds || (await pickSource('Open console for data source'));
-      if (!ds) return;
-      const doc = await vscode.workspace.openTextDocument({ language: 'sql', content: '' });
-      await bind(doc, ds);
-      await vscode.window.showTextDocument(doc);
-      updateStatus();
+      if (ds) await newConsole(ds);
+    }),
+    cmd('dataflip.deleteConsole', async (n) => {
+      const ok = await vscode.window.showWarningMessage(`Delete console "${n.uri.path.split('/').pop()}"?`, { modal: true }, 'Delete');
+      if (!ok) return;
+      await vscode.workspace.fs.delete(n.uri, { useTrash: true });
+      tree.fire(sourceNodes.get(n.ds.id));
     }),
     cmd('dataflip.attachSource', async () => {
       const doc = vscode.window.activeTextEditor?.document;
@@ -303,8 +442,42 @@ function activate(context) {
       await bind(doc, ds);
       updateStatus();
     }),
-    cmd('dataflip.openTable', (n) =>
-      runAndShow(n.ds, (db) => db.preview(n.schema, n.name), `${n.schema}.${n.name}`)),
+    cmd('dataflip.openTable', (n) => openTable(n.ds, n.schema, n.name, n.view)),
+    cmd('dataflip.addColumn', async (n) => {
+      const name = await askName(`New column in ${n.schema}.${n.name}`);
+      if (!name) return;
+      const type = await vscode.window.showInputBox({
+        prompt: 'Type and options, e.g. varchar(100) not null default \'\'', ignoreFocusOut: true,
+        validateInput: (v) => (v.trim() ? null : 'Type is required'),
+      });
+      if (type) await alterTable(n, (await connect(n.ds)).addColumn(n.schema, n.name, name.trim(), type.trim()));
+    }),
+    cmd('dataflip.renameColumn', async (n) => {
+      const name = await askName(`Rename column ${n.col.name}`, n.col.name);
+      if (name && name.trim() !== n.col.name) {
+        await alterTable(n.parent, (await connect(n.ds)).renameColumn(n.schema, n.table, n.col.name, name.trim()));
+      }
+    }),
+    cmd('dataflip.dropColumn', async (n) => {
+      const ok = await vscode.window.showWarningMessage(
+        `Drop column "${n.col.name}" from ${n.schema}.${n.table}? Its data is deleted permanently.`, { modal: true }, 'Drop Column');
+      if (ok) await alterTable(n.parent, (await connect(n.ds)).dropColumn(n.schema, n.table, n.col.name));
+    }),
+    cmd('dataflip.history.open', async (h) => {
+      const ds = historySource(h);
+      if (ds) await newConsole(ds, h.sql);
+    }),
+    cmd('dataflip.history.rerun', (h) => {
+      const ds = historySource(h);
+      if (ds) return runAndShow(ds, h.sql, ds.name);
+    }),
+    cmd('dataflip.history.copy', (h) => vscode.env.clipboard.writeText(h.sql)),
+    cmd('dataflip.history.clear', async () => {
+      const ok = await vscode.window.showWarningMessage('Clear query history?', { modal: true }, 'Clear');
+      if (!ok) return;
+      await globalState.update(HISTORY, []);
+      historyChanged.fire();
+    }),
     cmd('dataflip.copyName', (n) =>
       vscode.env.clipboard.writeText(n.kind === 'column' ? n.col.name : n.kind === 'schema' ? n.schema : `${n.schema}.${n.name}`)),
     cmd('dataflip.execute', execute),
