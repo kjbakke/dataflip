@@ -12,7 +12,8 @@ function cell(v) {
     return '0x' + hex.toUpperCase() + (v.length > 64 ? '…' : '');
   }
   if (typeof v === 'bigint') return v.toString();
-  if (typeof v === 'object') return JSON.stringify(v);
+  if (typeof v === 'object' && typeof v.value === 'string') return v.value; // BigQuery INT64/DATE/TIMESTAMP wrappers
+  if (typeof v === 'object') return JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && typeof x.value === 'string' ? x.value : x));
   return String(v);
 }
 
@@ -45,7 +46,7 @@ class ResultsView {
       ms,
       columns: res.columns,
       rows: shown.map((r) => r.map(cell)),
-      total: res.rows.length,
+      total: res.total ?? res.rows.length,
       affected: res.affected,
     });
   }

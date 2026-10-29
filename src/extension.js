@@ -49,7 +49,7 @@ function activate(context) {
           const item = new vscode.TreeItem(n.ds.name, Collapsed);
           item.id = n.ds.id;
           item.contextValue = 'source';
-          item.description = d.file ? n.ds.file : `${d.label} · ${n.ds.host}:${n.ds.port}`;
+          item.description = d.file ? n.ds.file : d.cloud ? `${d.label} · ${n.ds.project}` : `${d.label} · ${n.ds.host}:${n.ds.port}`;
           item.iconPath = icon('database', connections.has(n.ds.id) ? 'charts.green' : undefined);
           return item;
         }
@@ -160,20 +160,36 @@ function activate(context) {
     const d = DRIVERS[driver.id];
     const ds = { id: crypto.randomUUID(), driver: driver.id };
     let password;
+    const ask = (prompt, value, extra) => vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true, ...extra });
 
     if (d.file) {
       const uri = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Use Database File' });
       if (!uri) return;
       ds.file = uri[0].fsPath;
       ds.name = uri[0].path.split('/').pop();
+    } else if (d.cloud) {
+      ds.project = await ask('GCP project ID', '', { validateInput: (v) => (v.trim() ? null : 'Project ID is required') });
+      if (!ds.project) return;
+      const auth = await vscode.window.showQuickPick(
+        ['Application Default Credentials (gcloud auth application-default login)', 'Service account key file…'],
+        { placeHolder: 'Authentication' });
+      if (!auth) return;
+      if (auth.startsWith('Service')) {
+        const key = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { JSON: ['json'] }, openLabel: 'Use Key File' });
+        if (!key) return;
+        ds.keyFile = key[0].fsPath;
+      }
+      ds.location = await ask('Location (blank = auto, e.g. EU, US, europe-north1)', '');
+      if (ds.location === undefined) return;
+      ds.name = await ask('Name', ds.project);
+      if (!ds.name) return;
     } else {
-      const ask = (prompt, value, extra) => vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true, ...extra });
       ds.host = await ask('Host', 'localhost');
       if (ds.host === undefined) return;
       const port = await ask('Port', String(d.port), { validateInput: (v) => (/^\d+$/.test(v) ? null : 'Port must be a number') });
       if (port === undefined) return;
       ds.port = Number(port);
-      ds.database = await ask('Database', driver.id === 'postgres' ? 'postgres' : '');
+      ds.database = await ask('Database', d.database || '');
       if (ds.database === undefined) return;
       ds.user = await ask('User', d.user);
       if (ds.user === undefined) return;
@@ -288,7 +304,7 @@ function activate(context) {
       updateStatus();
     }),
     cmd('dataflip.openTable', (n) =>
-      runAndShow(n.ds, (db) => `select * from ${db.quote(n.schema)}.${db.quote(n.name)} limit 500`, `${n.schema}.${n.name}`)),
+      runAndShow(n.ds, (db) => db.preview(n.schema, n.name), `${n.schema}.${n.name}`)),
     cmd('dataflip.copyName', (n) =>
       vscode.env.clipboard.writeText(n.kind === 'column' ? n.col.name : n.kind === 'schema' ? n.schema : `${n.schema}.${n.name}`)),
     cmd('dataflip.execute', execute),

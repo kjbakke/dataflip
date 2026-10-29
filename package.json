@@ -5,28 +5,50 @@
   "version": "0.1.0",
   "publisher": "kjbakke",
   "license": "MIT",
-  "engines": { "vscode": "^1.100.0" },
-  "categories": ["Other"],
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
   "main": "./src/extension.js",
-  "activationEvents": ["onLanguage:sql"],
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
   "scripts": {
     "test": "node --test test/*.test.js"
   },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "dataflip", "title": "Database", "icon": "media/database.svg" }
+        {
+          "id": "dataflip",
+          "title": "Database",
+          "icon": "media/database.svg"
+        }
       ],
       "panel": [
-        { "id": "dataflipPanel", "title": "Database Results", "icon": "media/database.svg" }
+        {
+          "id": "dataflipPanel",
+          "title": "Database Results",
+          "icon": "media/database.svg"
+        }
       ]
     },
     "views": {
       "dataflip": [
-        { "id": "dataflip.sources", "name": "Data Sources", "icon": "$(database)" }
+        {
+          "id": "dataflip.sources",
+          "name": "Data Sources",
+          "icon": "$(database)"
+        }
       ],
       "dataflipPanel": [
-        { "id": "dataflip.results", "name": "Results", "type": "webview" }
+        {
+          "id": "dataflip.results",
+          "name": "Results",
+          "type": "webview"
+        }
       ]
     },
     "viewsWelcome": [
@@ -36,46 +58,152 @@
       }
     ],
     "commands": [
-      { "command": "dataflip.addSource", "title": "Add Data Source", "category": "Database", "icon": "$(add)" },
-      { "command": "dataflip.removeSource", "title": "Remove Data Source", "category": "Database", "icon": "$(trash)" },
-      { "command": "dataflip.refresh", "title": "Refresh", "category": "Database", "icon": "$(refresh)" },
-      { "command": "dataflip.disconnect", "title": "Disconnect", "category": "Database", "icon": "$(debug-disconnect)" },
-      { "command": "dataflip.newConsole", "title": "New Query Console", "category": "Database", "icon": "$(terminal)" },
-      { "command": "dataflip.openTable", "title": "Open Table Data", "category": "Database", "icon": "$(table)" },
-      { "command": "dataflip.copyName", "title": "Copy Name", "category": "Database" },
-      { "command": "dataflip.attachSource", "title": "Attach Data Source to File", "category": "Database" },
-      { "command": "dataflip.execute", "title": "Execute Statement", "category": "Database", "icon": "$(play)" }
+      {
+        "command": "dataflip.addSource",
+        "title": "Add Data Source",
+        "category": "Database",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dataflip.removeSource",
+        "title": "Remove Data Source",
+        "category": "Database",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dataflip.refresh",
+        "title": "Refresh",
+        "category": "Database",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dataflip.disconnect",
+        "title": "Disconnect",
+        "category": "Database",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "dataflip.newConsole",
+        "title": "New Query Console",
+        "category": "Database",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "dataflip.openTable",
+        "title": "Open Table Data",
+        "category": "Database",
+        "icon": "$(table)"
+      },
+      {
+        "command": "dataflip.copyName",
+        "title": "Copy Name",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.attachSource",
+        "title": "Attach Data Source to File",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.execute",
+        "title": "Execute Statement",
+        "category": "Database",
+        "icon": "$(play)"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "dataflip.addSource", "when": "view == dataflip.sources", "group": "navigation@1" },
-        { "command": "dataflip.refresh", "when": "view == dataflip.sources", "group": "navigation@2" }
+        {
+          "command": "dataflip.addSource",
+          "when": "view == dataflip.sources",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dataflip.refresh",
+          "when": "view == dataflip.sources",
+          "group": "navigation@2"
+        }
       ],
       "view/item/context": [
-        { "command": "dataflip.newConsole", "when": "view == dataflip.sources && viewItem == source", "group": "inline@1" },
-        { "command": "dataflip.newConsole", "when": "view == dataflip.sources && viewItem == source", "group": "1_main@1" },
-        { "command": "dataflip.refresh", "when": "view == dataflip.sources && viewItem == source", "group": "1_main@2" },
-        { "command": "dataflip.disconnect", "when": "view == dataflip.sources && viewItem == source", "group": "1_main@3" },
-        { "command": "dataflip.removeSource", "when": "view == dataflip.sources && viewItem == source", "group": "9_danger@1" },
-        { "command": "dataflip.openTable", "when": "view == dataflip.sources && viewItem == table", "group": "inline@1" },
-        { "command": "dataflip.openTable", "when": "view == dataflip.sources && viewItem == table", "group": "1_main@1" },
-        { "command": "dataflip.copyName", "when": "view == dataflip.sources && viewItem =~ /^(table|column|schema)$/", "group": "1_main@2" }
+        {
+          "command": "dataflip.newConsole",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "inline@1"
+        },
+        {
+          "command": "dataflip.newConsole",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "1_main@1"
+        },
+        {
+          "command": "dataflip.refresh",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "1_main@2"
+        },
+        {
+          "command": "dataflip.disconnect",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "1_main@3"
+        },
+        {
+          "command": "dataflip.removeSource",
+          "when": "view == dataflip.sources && viewItem == source",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "dataflip.openTable",
+          "when": "view == dataflip.sources && viewItem == table",
+          "group": "inline@1"
+        },
+        {
+          "command": "dataflip.openTable",
+          "when": "view == dataflip.sources && viewItem == table",
+          "group": "1_main@1"
+        },
+        {
+          "command": "dataflip.copyName",
+          "when": "view == dataflip.sources && viewItem =~ /^(table|column|schema)$/",
+          "group": "1_main@2"
+        }
       ],
       "editor/title": [
-        { "command": "dataflip.execute", "when": "editorLangId == sql", "group": "navigation" }
+        {
+          "command": "dataflip.execute",
+          "when": "editorLangId == sql",
+          "group": "navigation"
+        }
       ],
       "commandPalette": [
-        { "command": "dataflip.openTable", "when": "false" },
-        { "command": "dataflip.copyName", "when": "false" },
-        { "command": "dataflip.removeSource", "when": "false" },
-        { "command": "dataflip.disconnect", "when": "false" }
+        {
+          "command": "dataflip.openTable",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.copyName",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.removeSource",
+          "when": "false"
+        },
+        {
+          "command": "dataflip.disconnect",
+          "when": "false"
+        }
       ]
     },
     "keybindings": [
-      { "command": "dataflip.execute", "key": "ctrl+enter", "mac": "cmd+enter", "when": "editorTextFocus && editorLangId == sql" }
+      {
+        "command": "dataflip.execute",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == sql"
+      }
     ]
   },
   "dependencies": {
+    "@google-cloud/bigquery": "^8.3.1",
+    "mssql": "^11.0.2",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1"
   }
