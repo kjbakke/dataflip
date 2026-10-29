@@ -357,6 +357,90 @@ function activate(context) {
     return copy;
   }
 
+  // ---- export / import: data sources, their consoles and query history in one JSON file
+  // (backups, another machine, or moving between builds of the extension, which never share storage)
+
+  const EXPORT_VERSION = 1;
+
+  async function exportSources(target, withPasswords) {
+    if (withPasswords === undefined) {
+      const pick = await vscode.window.showQuickPick(
+        [{ label: 'Without passwords', value: false }, { label: 'Include passwords', description: 'stored in plain text in the file', value: true }],
+        { placeHolder: 'Export data sources' });
+      if (!pick) return;
+      withPasswords = pick.value;
+    }
+    target ??= await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(require('node:path').join(require('node:os').homedir(), 'dataflip-sources.json')),
+      filters: { JSON: ['json'] },
+    });
+    if (!target) return;
+    const all = sources();
+    const passwords = {};
+    if (withPasswords) {
+      for (const ds of all) {
+        const pw = await secrets.get(secretKey(ds.id));
+        if (pw) passwords[ds.id] = pw;
+      }
+    }
+    const consoles = [];
+    for (const ds of all) {
+      for (const uri of await consoleFiles(ds)) {
+        consoles.push({ source: ds.id, name: uri.path.split('/').pop(), content: Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8') });
+      }
+    }
+    const data = { dataflip: EXPORT_VERSION, sources: all, passwords, consoles, history: history() };
+    await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(data, null, 2)));
+    vscode.window.showInformationMessage(
+      `Exported ${all.length} data source(s) to ${target.fsPath}` + (withPasswords ? '. The file contains passwords: keep it safe and delete it when done.' : '.'));
+  }
+
+  // Adds what is not here yet (matched by id); never overwrites an existing data source.
+  async function importSources(file) {
+    file ??= (await vscode.window.showOpenDialog({ canSelectMany: false, filters: { JSON: ['json'] }, openLabel: 'Import' }))?.[0];
+    if (!file) return;
+    let data;
+    try {
+      data = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(file)).toString('utf8'));
+    } catch {
+      data = undefined;
+    }
+    if (data?.dataflip !== EXPORT_VERSION || !Array.isArray(data.sources)) {
+      vscode.window.showErrorMessage('Not a DataFlip export file.'); // not awaited: the command ends while the message shows
+      return;
+    }
+    const existing = new Set(sources().map((s) => s.id));
+    const added = data.sources.filter((s) => typeof s?.id === 'string' && DRIVERS[s.driver] && typeof s.name === 'string' && !existing.has(s.id));
+    for (const ds of added) {
+      const pw = data.passwords?.[ds.id];
+      if (typeof pw === 'string' && pw) await secrets.store(secretKey(ds.id), pw);
+    }
+    await globalState.update(SOURCES, [...sources(), ...added]);
+
+    let consoles = 0;
+    const known = new Set(sources().map((s) => s.id));
+    for (const c of Array.isArray(data.consoles) ? data.consoles : []) {
+      // plain file names only, so an edited file cannot write outside the consoles folder
+      if (!known.has(c?.source) || !/^[^/\\]+\.sql$/.test(c.name) || c.name.startsWith('.') || typeof c.content !== 'string') continue;
+      const uri = vscode.Uri.joinPath(consolesDir, c.source, c.name);
+      if (await vscode.workspace.fs.stat(uri).then(() => true, () => false)) continue;
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(c.content));
+      consoles++;
+    }
+
+    const seen = new Set(history().map((h) => `${h.at}\u0000${h.sql}`));
+    const newHistory = (Array.isArray(data.history) ? data.history : [])
+      .filter((h) => typeof h?.sql === 'string' && typeof h.at === 'number' && known.has(h.source) && !seen.has(`${h.at}\u0000${h.sql}`));
+    await globalState.update(HISTORY, [...history(), ...newHistory].sort((a, b) => b.at - a.at).slice(0, HISTORY_MAX));
+
+    tree.fire();
+    historyChanged.fire();
+    const skipped = data.sources.length - added.length;
+    vscode.window.showInformationMessage(
+      `Imported ${added.length} data source(s), ${consoles} console(s) and ${newHistory.length} history entr${newHistory.length === 1 ? 'y' : 'ies'}` +
+      (skipped ? `; ${skipped} already here or invalid, skipped.` : '.'));
+  }
+
   async function execute() {
     const editor = vscode.window.activeTextEditor;
     if (!editor) return;
@@ -706,6 +790,8 @@ function activate(context) {
       if (ds) return runAndShow(ds, h.database, h.sql, `history:${h.source}/${h.database ?? ''}`);
     }),
     cmd('dataflip.history.copy', (h) => vscode.env.clipboard.writeText(h.sql)),
+    cmd('dataflip.exportSources', exportSources),
+    cmd('dataflip.importSources', importSources),
     cmd('dataflip.history.clear', async () => {
       const ok = await vscode.window.showWarningMessage('Clear query history?', { modal: true }, 'Clear');
       if (!ok) return;

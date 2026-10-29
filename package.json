@@ -2,7 +2,7 @@
   "name": "dataflip",
   "displayName": "DataFlip",
   "description": "Browse, query, filter and edit PostgreSQL, MySQL, SQL Server, SQLite and BigQuery right inside VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "dataflip",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -71,7 +71,7 @@
     "viewsWelcome": [
       {
         "view": "dataflip.sources",
-        "contents": "No data sources yet.\n[Add Data Source](command:dataflip.addSource)"
+        "contents": "No data sources yet.\n[Add Data Source](command:dataflip.addSource)\n[Import Data Sources…](command:dataflip.importSources)"
       }
     ],
     "commands": [
@@ -183,6 +183,16 @@
         "title": "Duplicate Data Source",
         "category": "Database",
         "icon": "$(copy)"
+      },
+      {
+        "command": "dataflip.exportSources",
+        "title": "Export Data Sources…",
+        "category": "Database"
+      },
+      {
+        "command": "dataflip.importSources",
+        "title": "Import Data Sources…",
+        "category": "Database"
       }
     ],
     "menus": {
@@ -201,6 +211,16 @@
           "command": "dataflip.history.clear",
           "when": "view == dataflip.history",
           "group": "navigation"
+        },
+        {
+          "command": "dataflip.exportSources",
+          "when": "view == dataflip.sources",
+          "group": "9_transfer@1"
+        },
+        {
+          "command": "dataflip.importSources",
+          "when": "view == dataflip.sources",
+          "group": "9_transfer@2"
         }
       ],
       "view/item/context": [
