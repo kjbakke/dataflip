@@ -1,7 +1,7 @@
 {
   "name": "dataflip",
   "displayName": "DataFlip",
-  "description": "Data sources, query consoles and a results grid, modelled on the JetBrains Rider database tool window.",
+  "description": "Browse, query, filter and edit PostgreSQL, MySQL, SQL Server, SQLite and BigQuery right inside VS Code.",
   "version": "0.1.0",
   "publisher": "kjbakke",
   "license": "MIT",
@@ -13,7 +13,20 @@
     "vscode": "^1.100.0"
   },
   "categories": [
+    "Data Science",
+    "Visualization",
     "Other"
+  ],
+  "keywords": [
+    "sql",
+    "database",
+    "postgresql",
+    "mysql",
+    "sql server",
+    "sqlite",
+    "bigquery",
+    "query",
+    "data grid"
   ],
   "main": "./src/extension.js",
   "activationEvents": [
