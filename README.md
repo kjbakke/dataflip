@@ -1,33 +1,33 @@
 # DataFlip
 
-A VS Code extension modelled on the JetBrains Rider database tool window. Clean-room: it mirrors the workflow, not Rider's code.
+**A full database IDE inside VS Code.** Connect, browse, query, filter and edit PostgreSQL, MySQL, SQL Server, SQLite and BigQuery without leaving your editor.
 
-- **Data Sources** view: data source → databases (PostgreSQL, SQL Server) → schema → tables / views → columns (PK, type, nullability). MySQL lists its databases as schemas, BigQuery its datasets.
-- **Query consoles**: any `.sql` file can be attached to a data source and database (status bar, click to switch)
-- **Cmd/Ctrl+Enter** runs the selection, or the statement under the caret
-- **Results** grid in the bottom panel; **Open Table Data** shows the first 500 rows
-- **Column filters** like Excel: ▾ on each header lists the column's distinct values with counts, with search, (Select all), `<null>` and sort. In Open Table they run in the database over the whole table (values bound as parameters, each list respecting the other filters); on console results they filter the loaded rows.
-- **Table editor** (Open Table): `WHERE` / `ORDER BY` boxes and click-to-sort headers, run on the server. Double-click a cell to edit, add / delete rows, set NULL; changes stay pending until **Submit** (Cmd/Ctrl+Enter), which runs them in one transaction keyed by primary key. Any update or delete that does not hit exactly one row rolls the whole batch back. Tables without a primary key, views and BigQuery are read-only.
-- **Columns**: add, rename and drop from the tree's context menu
-- **Consoles** are saved files listed under each data source; **Query History** lists every statement run from a console (open in a console, run again, copy)
-- PostgreSQL (`pg`), MySQL / MariaDB (`mysql2`), SQL Server (`mssql`), SQLite (built-in `node:sqlite`), BigQuery (`@google-cloud/bigquery`)
-- **Edit** or **Duplicate** a data source from its context menu; editing keeps its consoles, history and bindings
-- Passwords live in VS Code secret storage
+## Features
 
-### BigQuery
+- **Every database in one sidebar.** Browse servers, databases, schemas, tables and columns, with primary keys and types at a glance.
+- **Smart autocomplete.** Tables, columns and aliases from your live schema, quoted correctly for each database.
+- **Run what's under the cursor.** `Cmd/Ctrl+Enter` executes the current statement or selection; results open in a fast grid.
+- **Excel-style filters.** Pick values from a column's dropdown, with counts, search and sorting. Filters run in the database across the whole table.
+- **Edit data in place.** Change cells, add and delete rows, then submit everything in one safe transaction.
+- **Change your schema.** Add, rename and drop columns from the tree.
+- **Consoles and history that stick around.** Every console is saved, and every query you run is one click away from running again.
+- **Secure by default.** Passwords stay in your OS keychain.
 
-Datasets show as schemas. Auth uses Application Default Credentials (`gcloud auth application-default login`) or a service account key file. Queries fetch only the first 1000 rows (the grid shows the total), so large results do not get pulled down. Every query is billed as usual.
+## Supported databases
 
-## Develop
+PostgreSQL · MySQL / MariaDB · SQL Server · SQLite · Google BigQuery
+
+## Getting started
+
+1. Open the **Database** view in the activity bar.
+2. Click **+ Add Data Source** and enter your connection details.
+3. Open a **Query Console** from the data source and start typing.
+
+## Development
 
 ```bash
 npm install
 npm test
 ```
 
-Press F5 in VS Code to launch an Extension Development Host.
-Set `DATAFLIP_PG`, `DATAFLIP_MYSQL`, `DATAFLIP_MSSQL` or `DATAFLIP_BIGQUERY` to a JSON connection config to also run the driver tests against those engines (see `test/drivers.test.js`; BigQuery runs against [goccy/bigquery-emulator](https://github.com/goccy/bigquery-emulator)).
-
-## Limits
-
-No autocomplete, one result tab, at most 1000 rows rendered, no column type changes.
+Press `F5` in VS Code to launch an Extension Development Host.

@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const crypto = require('node:crypto');
 const { DRIVERS } = require('./drivers');
 const { statementAt } = require('./splitter');
+const { KEYWORDS, tableRefs, caretContext, ident, same } = require('./completion');
 const { ResultsView } = require('./results');
 const { cell } = require('./cell');
 const { tableQuery, DISTINCT_MAX } = require('./query');
@@ -19,6 +20,10 @@ function activate(context) {
   const consolesDir = vscode.Uri.joinPath(context.globalStorageUri, 'consoles');
   const connections = new Map(); // source id -> Promise<driver>
   const sourceNodes = new Map(); // source id -> tree node, reused so the node can be refreshed by identity
+  // Disconnect collapses a source and keeps it closed: background work (autocomplete) must not reopen it,
+  // only an explicit action does (expanding it, running a query, opening a table).
+  const disconnected = new Set();
+  const collapseGen = new Map(); // source id -> bumped on Disconnect; a new tree id makes VS Code show it collapsed
   const results = new ResultsView();
 
   const sources = () => globalState.get(SOURCES, []);
@@ -28,6 +33,7 @@ function activate(context) {
   const ownDb = (ds, database) => (database && database !== ds.database ? database : undefined);
   const connKeys = (ds) => [...connections.keys()].filter((k) => k.startsWith(ds.id + '/'));
   function connect(ds, database) {
+    disconnected.delete(ds.id);
     database = ownDb(ds, database);
     const key = `${ds.id}/${database ?? ''}`;
     if (!connections.has(key)) {
@@ -40,6 +46,7 @@ function activate(context) {
   }
 
   async function disconnect(ds) {
+    forget(ds);
     await Promise.all(connKeys(ds).map((k) => {
       const p = connections.get(k);
       connections.delete(k);
@@ -63,7 +70,7 @@ function activate(context) {
         case 'source': {
           const d = DRIVERS[n.ds.driver];
           const item = new vscode.TreeItem(n.ds.name, Collapsed);
-          item.id = n.ds.id;
+          item.id = `${n.ds.id}#${collapseGen.get(n.ds.id) ?? 0}`;
           item.contextValue = 'source';
           item.description = d.file ? n.ds.file : d.cloud ? `${d.label} · ${n.ds.project}` : `${d.label} · ${n.ds.host}:${n.ds.port}`;
           item.iconPath = icon('database', connKeys(n.ds).length ? 'charts.green' : undefined);
@@ -488,6 +495,7 @@ function activate(context) {
     } catch (err) {
       return vscode.window.showErrorMessage(err.message || String(err));
     }
+    forget(tableNode.ds);
     tree.fire(tableNode);
     const same = (a, b) => ownDb(a.ds, a.database) === ownDb(b.ds, b.database);
     if (opened?.ds.id === tableNode.ds.id && same(opened, tableNode) && opened.schema === tableNode.schema && opened.table === tableNode.name) {
@@ -497,6 +505,89 @@ function activate(context) {
   const askName = (prompt, value) => vscode.window.showInputBox({
     prompt, value, ignoreFocusOut: true, validateInput: (v) => (v.trim() ? null : 'Name is required'),
   });
+
+  // ---- autocomplete in SQL consoles, from metadata cached per data source + database
+
+  const meta = new Map(); // `${ds.id}/${database}` -> Map(lookup -> Promise)
+  const forget = (ds) => [...meta.keys()].filter((k) => !ds || k.startsWith(ds.id + '/')).forEach((k) => meta.delete(k));
+  function metaFor(ds, database) {
+    const key = `${ds.id}/${ownDb(ds, database) ?? ''}`;
+    if (!meta.has(key)) meta.set(key, new Map());
+    const cache = meta.get(key);
+    const memo = (k, load) => {
+      if (!cache.has(k)) {
+        const p = connect(ds, database).then(load);
+        p.catch(() => cache.delete(k)); // failures are not cached: the next keystroke retries
+        cache.set(k, p);
+      }
+      return cache.get(k);
+    };
+    return {
+      schemas: () => memo('schemas', (db) => db.schemas()),
+      current: () => memo('current', (db) => db.currentSchema()),
+      tables: (schema) => memo(`t:${schema}`, (db) => db.tables(schema)),
+      columns: (schema, table) => memo(`c:${schema}\u0000${table}`, (db) => db.columns(schema, table)),
+    };
+  }
+
+  const Kind = vscode.CompletionItemKind;
+  const completionItem = (label, kind, detail, insertText, rank) => {
+    const item = new vscode.CompletionItem(label, kind);
+    item.detail = detail;
+    item.insertText = insertText;
+    item.sortText = `${rank}${label.toLowerCase()}`; // columns, then tables, schemas, keywords
+    return item;
+  };
+  const keywordItems = () => KEYWORDS.map((k) => completionItem(k.toUpperCase(), Kind.Keyword, undefined, undefined, 4));
+
+  async function completions(doc, pos) {
+    const b = binding(doc);
+    if (!b || disconnected.has(b.ds.id)) return keywordItems();
+    const { ds, database } = b;
+    const m = metaFor(ds, database);
+    const db = await connect(ds, database);
+    const name = (n) => ident(n, ds.driver, db.quote);
+    const text = doc.getText();
+    const offset = doc.offsetAt(pos);
+    const stmt = statementAt(text, offset);
+    // statementAt hands back the previous statement when the caret sits after its semicolon
+    const refs = stmt && !text.slice(stmt.end, offset).includes(';') ? tableRefs(stmt.text) : [];
+    const current = await m.current();
+
+    const schemaItems = async () => (await m.schemas()).map((s) => {
+      const item = completionItem(s, Kind.Module, 'schema', name(s), 3);
+      item.commitCharacters = ['.'];
+      return item;
+    });
+    const tableItems = async (schema) => (await m.tables(schema)).map((t) =>
+      completionItem(t.name, t.view ? Kind.Interface : Kind.Class, `${t.view ? 'view' : 'table'} · ${schema}`, name(t.name), 2));
+    const currentTables = async () => (current ? tableItems(current) : []);
+    // a reference as written -> real schema and table (case-insensitive, like unquoted SQL)
+    const resolve = async (ref) => {
+      const schema = ref.schema ? (await m.schemas()).find((x) => same(x, ref.schema)) : current;
+      const t = schema && (await m.tables(schema)).find((x) => same(x.name, ref.table));
+      return t && { schema, table: t.name };
+    };
+    const columnItems = async (ref, rank = 1) => {
+      const r = await resolve(ref);
+      return r ? (await m.columns(r.schema, r.table)).map((c) =>
+        completionItem(c.name, Kind.Field, `${c.type}${c.pk ? ' · PK' : ''} · ${ref.alias || r.table}`, name(c.name), rank)) : [];
+    };
+
+    const ctx = caretContext(text.slice(Math.max(0, offset - 2000), offset));
+    if (ctx.kind === 'qualified') {
+      if (!ctx.tablePosition) {
+        const ref = refs.find((r) => same(r.alias, ctx.qualifier)) || refs.find((r) => same(r.table, ctx.qualifier));
+        if (ref) return columnItems(ref, 0);
+      }
+      const schema = (await m.schemas()).find((x) => same(x, ctx.qualifier));
+      if (schema) return tableItems(schema);
+      return ctx.tablePosition ? [] : columnItems({ table: ctx.qualifier }, 0);
+    }
+    if (ctx.kind === 'table') return [...(await currentTables()), ...(await schemaItems())];
+    const columns = (await Promise.all(refs.map((r) => columnItems(r)))).flat();
+    return [...columns, ...(await currentTables()), ...(await schemaItems()), ...keywordItems()];
+  }
 
   // ---- query history (console statements, newest first)
 
@@ -532,6 +623,9 @@ function activate(context) {
     vscode.window.createTreeView('dataflip.sources', { treeDataProvider: provider, showCollapseAll: true }),
     historyChanged,
     vscode.window.createTreeView('dataflip.history', { treeDataProvider: historyProvider }),
+    vscode.languages.registerCompletionItemProvider('sql', {
+      provideCompletionItems: (doc, pos) => completions(doc, pos).catch(() => keywordItems()),
+    }, '.'),
     vscode.window.registerWebviewViewProvider('dataflip.results', results, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.window.onDidChangeActiveTextEditor(updateStatus),
     vscode.workspace.onDidOpenTextDocument(updateStatus),
@@ -539,9 +633,14 @@ function activate(context) {
     cmd('dataflip.addSource', addSource),
     cmd('dataflip.editSource', (n) => editSource(n.ds)),
     cmd('dataflip.duplicateSource', (n) => duplicateSource(n.ds)),
-    cmd('dataflip.refresh', (n) => tree.fire(n)),
+    cmd('dataflip.refresh', (n) => {
+      forget(n?.ds);
+      tree.fire(n);
+    }),
     cmd('dataflip.disconnect', async (n) => {
       await disconnect(n.ds);
+      disconnected.add(n.ds.id);
+      collapseGen.set(n.ds.id, (collapseGen.get(n.ds.id) ?? 0) + 1);
       tree.fire();
     }),
     cmd('dataflip.removeSource', async (n) => {
