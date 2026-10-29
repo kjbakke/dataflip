@@ -1,4 +1,6 @@
-# DataFlip
+<p align="center"><img src="media/icon.png" width="128" alt="DataFlip logo"></p>
+
+<h1 align="center">DataFlip</h1>
 
 **A full database IDE inside VS Code.** Connect, browse, query, filter and edit PostgreSQL, MySQL, SQL Server, SQLite and BigQuery without leaving your editor.
 
