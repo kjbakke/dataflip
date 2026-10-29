@@ -48,13 +48,6 @@
           "title": "Database",
           "icon": "media/database.svg"
         }
-      ],
-      "panel": [
-        {
-          "id": "dataflipPanel",
-          "title": "Database Results",
-          "icon": "media/database.svg"
-        }
       ]
     },
     "views": {
@@ -68,13 +61,6 @@
           "id": "dataflip.history",
           "name": "Query History",
           "icon": "$(history)"
-        }
-      ],
-      "dataflipPanel": [
-        {
-          "id": "dataflip.results",
-          "name": "Results",
-          "type": "webview"
         }
       ]
     },

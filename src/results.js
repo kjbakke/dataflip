@@ -5,22 +5,19 @@ const { cell } = require('./cell');
 // shortcut: renders at most this many rows, all rows are still fetched; add cursor paging if big results matter
 const MAX_ROWS = 1000;
 
-class ResultsView {
-  constructor() {
-    this.view = undefined;
+// One results grid in its own editor tab. `state` is whatever the owner needs to answer the
+// grid's messages (the table behind it, its filters); each tab keeps its own.
+class Grid {
+  constructor(panel) {
+    this.panel = panel;
     this.pending = undefined;
+    this.state = undefined;
     this.onAction = undefined; // (message from the grid) => void
-  }
-
-  resolveWebviewView(view) {
-    this.view = view;
-    view.webview.options = { enableScripts: true };
-    view.webview.html = html(crypto.randomBytes(16).toString('base64'));
-    view.webview.onDidReceiveMessage((m) => {
-      if (m === 'ready') return this.pending && view.webview.postMessage(this.pending);
+    panel.webview.html = html(crypto.randomBytes(16).toString('base64'));
+    panel.webview.onDidReceiveMessage((m) => {
+      if (m === 'ready') return this.pending && panel.webview.postMessage(this.pending);
       this.onAction?.(m);
     });
-    view.onDidDispose(() => (this.view = undefined));
   }
 
   running(title) {
@@ -45,9 +42,9 @@ class ResultsView {
     });
   }
 
-  // messages that update the open grid in place (not replayed when the view reloads)
+  // messages that update the grid in place (not replayed when it reloads)
   notify(msg) {
-    this.view?.webview.postMessage(msg);
+    this.panel.webview.postMessage(msg);
   }
 
   // tells the grid a submit failed without dropping its pending edits
@@ -55,16 +52,45 @@ class ResultsView {
     this.notify({ submitError: err?.message || String(err) });
   }
 
-  async post(msg) {
+  post(msg) {
     this.pending = msg;
-    if (this.view) {
-      this.view.show(true);
-      this.view.webview.postMessage(msg);
-    } else {
-      const editor = vscode.window.activeTextEditor;
-      await vscode.commands.executeCommand('dataflip.results.focus');
-      if (editor) vscode.window.showTextDocument(editor.document, editor.viewColumn); // keep caret in the console
+    this.panel.webview.postMessage(msg);
+  }
+}
+
+// Editor tabs keyed by what they show (a table, a console's results): opening the same key again
+// reveals and reuses its tab, anything new gets a tab of its own.
+class GridTabs {
+  constructor(iconPath) {
+    this.iconPath = iconPath;
+    this.tabs = new Map(); // key -> Grid
+  }
+
+  // beside: open next to the active editor and keep focus there (console results)
+  open(key, title, { beside = false } = {}) {
+    let grid = this.tabs.get(key);
+    if (grid) {
+      grid.panel.title = title;
+      grid.panel.reveal(undefined, beside); // stays in whatever group the user moved it to
+      return grid;
     }
+    const panel = vscode.window.createWebviewPanel(
+      'dataflip.grid', title,
+      { viewColumn: beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active, preserveFocus: beside },
+      { enableScripts: true, retainContextWhenHidden: true });
+    panel.iconPath = this.iconPath;
+    grid = new Grid(panel);
+    this.tabs.set(key, grid);
+    panel.onDidDispose(() => this.tabs.delete(key));
+    return grid;
+  }
+
+  all() {
+    return [...this.tabs.values()];
+  }
+
+  dispose() {
+    this.all().forEach((g) => g.panel.dispose());
   }
 }
 
@@ -481,4 +507,4 @@ function html(nonce) {
 </script></body></html>`;
 }
 
-module.exports = { ResultsView };
+module.exports = { GridTabs };

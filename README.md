@@ -8,7 +8,8 @@
 
 - **Every database in one sidebar.** Browse servers, databases, schemas, tables and columns, with primary keys and types at a glance.
 - **Smart autocomplete.** Tables, columns and aliases from your live schema, quoted correctly for each database.
-- **Run what's under the cursor.** `Cmd/Ctrl+Enter` executes the current statement or selection; results open in a fast grid.
+- **Run what's under the cursor.** `Cmd/Ctrl+Enter` executes the current statement or selection.
+- **A tab for everything.** Every table and every console's results open in their own tab, side by side, each with its own filters and edits.
 - **Excel-style filters.** Pick values from a column's dropdown, with counts, search and sorting. Filters run in the database across the whole table.
 - **Edit data in place.** Change cells, add and delete rows, then submit everything in one safe transaction.
 - **Change your schema.** Add, rename and drop columns from the tree.
