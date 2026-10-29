@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "kjbakke",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1E1B4B",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/kjbakke/dataflip.git"
