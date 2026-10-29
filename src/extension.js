@@ -20,6 +20,10 @@ function activate(context) {
   const consolesDir = vscode.Uri.joinPath(context.globalStorageUri, 'consoles');
   const connections = new Map(); // source id -> Promise<driver>
   const sourceNodes = new Map(); // source id -> tree node, reused so the node can be refreshed by identity
+  // Disconnect collapses a source and keeps it closed: background work (autocomplete) must not reopen it,
+  // only an explicit action does (expanding it, running a query, opening a table).
+  const disconnected = new Set();
+  const collapseGen = new Map(); // source id -> bumped on Disconnect; a new tree id makes VS Code show it collapsed
   const results = new ResultsView();
 
   const sources = () => globalState.get(SOURCES, []);
@@ -29,6 +33,7 @@ function activate(context) {
   const ownDb = (ds, database) => (database && database !== ds.database ? database : undefined);
   const connKeys = (ds) => [...connections.keys()].filter((k) => k.startsWith(ds.id + '/'));
   function connect(ds, database) {
+    disconnected.delete(ds.id);
     database = ownDb(ds, database);
     const key = `${ds.id}/${database ?? ''}`;
     if (!connections.has(key)) {
@@ -65,7 +70,7 @@ function activate(context) {
         case 'source': {
           const d = DRIVERS[n.ds.driver];
           const item = new vscode.TreeItem(n.ds.name, Collapsed);
-          item.id = n.ds.id;
+          item.id = `${n.ds.id}#${collapseGen.get(n.ds.id) ?? 0}`;
           item.contextValue = 'source';
           item.description = d.file ? n.ds.file : d.cloud ? `${d.label} · ${n.ds.project}` : `${d.label} · ${n.ds.host}:${n.ds.port}`;
           item.iconPath = icon('database', connKeys(n.ds).length ? 'charts.green' : undefined);
@@ -537,7 +542,7 @@ function activate(context) {
 
   async function completions(doc, pos) {
     const b = binding(doc);
-    if (!b) return keywordItems();
+    if (!b || disconnected.has(b.ds.id)) return keywordItems();
     const { ds, database } = b;
     const m = metaFor(ds, database);
     const db = await connect(ds, database);
@@ -634,6 +639,8 @@ function activate(context) {
     }),
     cmd('dataflip.disconnect', async (n) => {
       await disconnect(n.ds);
+      disconnected.add(n.ds.id);
+      collapseGen.set(n.ds.id, (collapseGen.get(n.ds.id) ?? 0) + 1);
       tree.fire();
     }),
     cmd('dataflip.removeSource', async (n) => {
